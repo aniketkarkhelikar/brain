@@ -1,10 +1,10 @@
 # AI Second Brain — Task Tracker
 
-**Status:** Phase 3 complete; Phase 4 not started
+**Status:** Phases 1, 2 (local Qwen path), 3, and 8 complete; Phase 4 not started
 **Model:** `qwen2.5:14b` on lab52 (`172.25.128.20`)  
 **Interface:** CLI  
 **Started:** 2026-09-23
-**Checkpoint:** `c5cacc9` (`initial checkpoint`, `origin/main`)
+**Checkpoint:** `cfe5354` (`check point 2`, Phase 3 baseline pushed to `origin/main`); Phase 8 is implemented and verified in the current working tree
 
 **Verified stack:** Node.js 22, TypeScript 5.9, Vercel AI SDK 7.0.111
 
@@ -75,11 +75,13 @@
 - [ ] **TEST:** Agent can answer "What meetings do I have today?"
 
 ## Phase 8: Interactive CLI Chat
-- [ ] Create `src/index.ts` (readline CLI with streaming)
-- [ ] Create `src/memory/session.ts` (conversation persistence)
-- [ ] **TEST:** Multi-turn conversation works
-- [ ] **TEST:** History persists across restarts
-- [ ] **TEST:** Bootstrap onboarding triggers on first run
+- [x] Create `src/index.ts` and `src/cli.ts` (readline CLI with streamed responses and session commands)
+- [x] Create `src/memory/session.ts` (SQLite persistence, session isolation, and model-context compaction)
+- [x] Create `src/memory/bootstrap.ts` (resumable first-run onboarding; updates USER.md/SOUL.md and removes trigger)
+- [x] **TEST:** Multi-turn conversation and tool-call history work
+- [x] **TEST:** History persists across process restarts
+- [x] **TEST:** Bootstrap onboarding triggers on first run and resumes after interruption
+- [x] **LIVE TEST:** Qwen streaming CLI answered across two separate process runs using a temporary vault/database
 
 ## Phase 9: Security & Deployment
 - [ ] Create `src/utils/file-lock.ts` (concurrent write safety)
@@ -100,3 +102,6 @@
 | 2 | Live Qwen tool loop: search → read; write → read-back | Passed using temporary synthetic vault | 2026-09-23 |
 | 3 | Vault tool unit tests | 8 passed, 0 failed | 2026-09-23 |
 | 3 | Live Qwen search/read/list navigation | Passed using temporary synthetic vault | 2026-09-23 |
+| 8 | Session persistence, isolation, compaction, CLI commands, and resumable onboarding unit tests | 9 passed, 0 failed | 2026-09-23 |
+| 8 | Full test suite including Phase 3 regression tests | 17 passed, 0 failed | 2026-09-23 |
+| 8 | Live Qwen CLI streaming and cross-restart recall (`FERN-731`) | Passed with temporary vault/database; model tool history persisted | 2026-09-23 |

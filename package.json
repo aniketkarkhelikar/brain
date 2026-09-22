@@ -6,7 +6,7 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "tsx src/index.ts",
-    "test": "tsx --test src/tools/vault-tools.test.ts",
+    "test": "tsx --test src/tools/vault-tools.test.ts src/memory/session.test.ts src/memory/bootstrap.test.ts src/cli.test.ts",
     "heartbeat": "tsx src/heartbeat/cron.ts",
     "test:connection": "tsx src/test-connection.ts",
     "test:agent": "tsx src/test-agent.ts",

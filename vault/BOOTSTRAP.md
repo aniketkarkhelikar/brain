@@ -29,7 +29,7 @@ The agent should ask these one at a time, updating USER.md and SOUL.md with each
 
 ### 6. Integrations
 - Which email account should the agent monitor?
-- Do you use Google Calendar? (provide .ics URL if yes)
+- Do you use Google Calendar? Record the provider only; configure any private .ics URL locally in `.env` later.
 
 ### 7. Proactivity Level
 Choose one:
