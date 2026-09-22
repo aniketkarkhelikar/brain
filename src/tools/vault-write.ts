@@ -2,42 +2,33 @@
  * vault-write.ts — Write or append to vault files
  */
 
-import { tool } from 'ai';
+import { tool, type Tool } from 'ai';
 import { z } from 'zod';
-import fs from 'fs/promises';
-import path from 'path';
+import { toolError, writeVaultFile } from './vault-fs.js';
 
-const VAULT_PATH = process.env.VAULT_PATH || './vault';
+type VaultWriteInput = { filePath: string; content: string; mode: 'write' | 'append' };
+type VaultWriteOutput =
+  | { success: true; path: string; mode: 'write' | 'append'; bytesWritten: number }
+  | { success: false; error: string };
 
-export const vaultWrite = tool({
+export const vaultWrite: Tool<VaultWriteInput, VaultWriteOutput> = tool({
   description: 'Write content to a vault file. Can create new files or overwrite existing ones. Use mode "append" to add to existing files (e.g. daily logs).',
-  parameters: z.object({
-    filePath: z.string().describe('Relative path within the vault, e.g. "Knowledgebase/concepts/RAG.md" or "daily/2026-09-23.md"'),
-    content: z.string().describe('The markdown content to write'),
+  inputSchema: z.object({
+    filePath: z.string().min(1).max(1024).describe('Relative path within the vault, e.g. "Knowledgebase/concepts/RAG.md" or "daily/2026-09-23.md"'),
+    content: z.string().max(5_000_000).describe('The markdown content to write (maximum 5 million characters)'),
     mode: z.enum(['write', 'append']).default('write').describe('"write" to create/overwrite, "append" to add to end of file'),
   }),
   execute: async ({ filePath, content, mode }) => {
     try {
-      const fullPath = path.join(VAULT_PATH, filePath);
-      
-      // Ensure parent directory exists
-      await fs.mkdir(path.dirname(fullPath), { recursive: true });
-      
-      if (mode === 'append') {
-        await fs.appendFile(fullPath, '\n' + content);
-      } else {
-        await fs.writeFile(fullPath, content);
-      }
-      
-      const stats = await fs.stat(fullPath);
-      return { 
+      const bytesWritten = await writeVaultFile(filePath, content, mode);
+      return {
         success: true, 
-        path: filePath, 
-        mode, 
-        bytesWritten: stats.size,
+        path: filePath,
+        mode,
+        bytesWritten,
       };
-    } catch (err: any) {
-      return { success: false, error: `Cannot write ${filePath}: ${err.message}` };
+    } catch (error) {
+      return { success: false, error: toolError('Write', filePath, error) };
     }
   },
 });

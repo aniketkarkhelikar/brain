@@ -1,42 +1,49 @@
 # AI Second Brain — Task Tracker
 
-**Status:** 🚧 In Progress  
+**Status:** Phase 3 complete; Phase 4 not started
 **Model:** `qwen2.5:14b` on lab52 (`172.25.128.20`)  
 **Interface:** CLI  
 **Started:** 2026-09-23
+**Checkpoint:** `c5cacc9` (`initial checkpoint`, `origin/main`)
+
+**Verified stack:** Node.js 22, TypeScript 5.9, Vercel AI SDK 7.0.111
+
+> The SDK research report contains older examples. For the installed AI SDK 7, use `inputSchema` for tools, `ModelMessage` for history, `stopWhen: isStepCount(n)` for loop limits, and `result.responseMessages` to retain all assistant/tool messages. `result.response.messages` only contains the final model call.
 
 ---
 
 ## Phase 1: Foundation — Vault Structure & Memory Layer
-- [ ] Create `package.json` with all dependencies
-- [ ] Create `tsconfig.json`
-- [ ] Create `.env` with Ollama config
-- [ ] Create vault directory structure
-- [ ] Create `vault/SOUL.md` (agent identity)
-- [ ] Create `vault/USER.md` (user profile template)
-- [ ] Create `vault/MEMORY.md` (key facts store)
-- [ ] Create `vault/HEARTBEAT.md` (proactive checklist)
-- [ ] Create `vault/BOOTSTRAP.md` (onboarding wizard)
-- [ ] Create `vault/index.md` and `vault/log.md`
-- [ ] Install npm dependencies
-- [ ] **TEST:** Verify vault structure exists and files are readable
-- [ ] **TEST:** Verify npm install succeeds
+- [x] Create `package.json` with dependencies
+- [x] Create `tsconfig.json`
+- [x] Configure local `.env` with Ollama settings (ignored by Git)
+- [x] Create vault directory structure, including the ignored email/archive data folders
+- [x] Create `vault/SOUL.md` (agent identity)
+- [x] Create `vault/USER.md` (user profile template)
+- [x] Create `vault/MEMORY.md` (key facts store)
+- [x] Create `vault/HEARTBEAT.md` (proactive checklist)
+- [x] Create `vault/BOOTSTRAP.md` (onboarding wizard)
+- [x] Create `vault/index.md` and `vault/log.md`
+- [x] Install npm dependencies
+- [x] **TEST:** Vault templates and directories are present/readable
+- [x] **TEST:** Dependencies resolve with `npm ls --depth=0`
 
 ## Phase 2: Provider Registry & Core Agent Engine
-- [ ] Create `src/providers.ts` (multi-provider registry, Ollama → lab52)
-- [ ] Create `src/agent.ts` (core generateText loop with tools)
-- [ ] Create `src/tools/vault-read.ts`
-- [ ] Create `src/tools/vault-write.ts`
-- [ ] Create `src/tools/index.ts` (barrel export)
-- [ ] **TEST:** Verify Ollama connectivity to lab52 (`qwen2.5:14b`)
-- [ ] **TEST:** Verify basic tool calling (read a vault file via agent)
-- [ ] **TEST:** Verify multi-step loop (read → write → confirm)
+- [x] Create `src/providers.ts` (Ollama → lab52 resolver with `num_ctx`)
+- [x] Create `src/agent.ts` (Vercel AI SDK tool loop)
+- [x] Create `src/tools/vault-read.ts`
+- [x] Create `src/tools/vault-write.ts`
+- [x] Create `src/tools/index.ts` (barrel export)
+- [x] **TEST:** Ollama API and configured `qwen2.5:14b` are reachable
+- [x] **TEST:** Live agent calls vault tools
+- [x] **TEST:** Live multi-step loop writes and reads back a file in a temporary vault
+- [ ] Add online provider registry/fallback (OpenAI/Anthropic); deferred while the configured Qwen local path is the target
 
 ## Phase 3: Tool Definitions & Vault Search
-- [ ] Create `src/tools/vault-search.ts` (keyword grep search)
-- [ ] Create `src/tools/vault-list.ts` (list vault directory contents)
-- [ ] **TEST:** Agent can search vault for keywords
-- [ ] **TEST:** Agent can list and navigate vault structure
+- [x] Create `src/tools/vault-search.ts` (case-insensitive recursive Markdown search)
+- [x] Create `src/tools/vault-list.ts` (list vault directory contents)
+- [x] **TEST:** Unit coverage for read/write/search/list and input validation
+- [x] **TEST:** Agent searches, follows a search result with read, and lists a nested directory
+- [x] **TEST:** Absolute paths, traversal, and external symlinks cannot escape the vault
 
 ## Phase 4: Email Integration (IMAP Pull)
 - [ ] Create `src/integrations/email.ts` (IMAP connector)
@@ -87,4 +94,9 @@
 
 | Phase | Test | Result | Date |
 |-------|------|--------|------|
-| — | — | — | — |
+| 1 | Vault structure/templates and dependency install | Passed | 2026-09-23 |
+| 2 | Strict TypeScript check against installed AI SDK 7 | Passed | 2026-09-23 |
+| 2 | Ollama API reachable; configured `qwen2.5:14b` available | Passed | 2026-09-23 |
+| 2 | Live Qwen tool loop: search → read; write → read-back | Passed using temporary synthetic vault | 2026-09-23 |
+| 3 | Vault tool unit tests | 8 passed, 0 failed | 2026-09-23 |
+| 3 | Live Qwen search/read/list navigation | Passed using temporary synthetic vault | 2026-09-23 |

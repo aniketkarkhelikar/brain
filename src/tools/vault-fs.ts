@@ -1,0 +1,241 @@
+/** Shared, vault-confined filesystem operations for the agent tools. */
+
+import { constants as fsConstants } from 'node:fs';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
+export class VaultPathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VaultPathError';
+  }
+}
+
+function compareNames(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function vaultPath(): string {
+  return path.resolve(process.cwd(), process.env.VAULT_PATH || './vault');
+}
+
+function relativeSegments(input: string, allowRoot = false): string[] {
+  if (input.includes('\0')) {
+    throw new VaultPathError('Paths cannot contain a null character.');
+  }
+
+  const normalized = input.replaceAll('\\', '/');
+  if (
+    path.posix.isAbsolute(normalized) ||
+    path.win32.isAbsolute(input) ||
+    /^[a-zA-Z]:/.test(input)
+  ) {
+    throw new VaultPathError('Use a relative path inside the vault.');
+  }
+
+  if (normalized === '' || normalized === '.') {
+    if (allowRoot) return [];
+    throw new VaultPathError('A file path inside the vault is required.');
+  }
+
+  const segments = normalized.split('/');
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    throw new VaultPathError('Paths cannot contain empty, ".", or ".." segments.');
+  }
+
+  return segments;
+}
+
+async function getVaultRoot(): Promise<string> {
+  const root = await fs.realpath(vaultPath());
+  const stats = await fs.stat(root);
+  if (!stats.isDirectory()) throw new VaultPathError('The configured vault path is not a directory.');
+  return root;
+}
+
+function assertContained(root: string, candidate: string): void {
+  const relative = path.relative(root, candidate);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new VaultPathError('The requested path is outside the vault.');
+  }
+}
+
+async function inspectExistingPath(
+  root: string,
+  segments: string[],
+  allowRoot: boolean,
+): Promise<string> {
+  if (segments.length === 0) {
+    if (!allowRoot) throw new VaultPathError('A path inside the vault is required.');
+    return root;
+  }
+
+  let current = root;
+  for (const [index, segment] of segments.entries()) {
+    current = path.join(current, segment);
+    const stats = await fs.lstat(current);
+    if (stats.isSymbolicLink()) {
+      throw new VaultPathError('Symbolic links are not allowed in vault paths.');
+    }
+    if (index < segments.length - 1 && !stats.isDirectory()) {
+      throw new VaultPathError('A parent path component is not a directory.');
+    }
+  }
+
+  assertContained(root, current);
+  return current;
+}
+
+async function existingFile(filePath: string): Promise<string> {
+  const root = await getVaultRoot();
+  const segments = relativeSegments(filePath);
+  const fullPath = await inspectExistingPath(root, segments, false);
+  const stats = await fs.stat(fullPath);
+  if (!stats.isFile()) throw new VaultPathError('The requested vault path is not a file.');
+  return fullPath;
+}
+
+export async function readVaultFile(filePath: string): Promise<string> {
+  return fs.readFile(await existingFile(filePath), 'utf8');
+}
+
+async function safeWritePath(filePath: string): Promise<string> {
+  const root = await getVaultRoot();
+  const segments = relativeSegments(filePath);
+  let current = root;
+
+  for (const segment of segments.slice(0, -1)) {
+    const next = path.join(current, segment);
+    try {
+      await fs.mkdir(next);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+
+    const stats = await fs.lstat(next);
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+      throw new VaultPathError('A parent path component is not a safe directory.');
+    }
+    const realNext = await fs.realpath(next);
+    assertContained(root, realNext);
+    current = realNext;
+  }
+
+  const fullPath = path.join(current, segments.at(-1)!);
+  assertContained(root, fullPath);
+  try {
+    const stats = await fs.lstat(fullPath);
+    if (stats.isSymbolicLink()) throw new VaultPathError('Symbolic links are not allowed in vault paths.');
+    if (!stats.isFile()) throw new VaultPathError('The requested vault path is not a file.');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  return fullPath;
+}
+
+export async function writeVaultFile(
+  filePath: string,
+  content: string,
+  mode: 'write' | 'append',
+): Promise<number> {
+  const fullPath = await safeWritePath(filePath);
+  let text = content;
+
+  if (mode === 'append' && content.length > 0) {
+    try {
+      const existing = await fs.readFile(fullPath, 'utf8');
+      if (existing.length > 0 && !existing.endsWith('\n')) text = `\n${text}`;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+
+  const flags = mode === 'append'
+    ? fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT
+    : fsConstants.O_WRONLY | fsConstants.O_TRUNC | fsConstants.O_CREAT;
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  const handle = await fs.open(fullPath, flags | noFollow, 0o600);
+  try {
+    await handle.writeFile(text, 'utf8');
+  } finally {
+    await handle.close();
+  }
+
+  return Buffer.byteLength(text, 'utf8');
+}
+
+export async function listVaultDirectory(dirPath: string): Promise<Array<{ name: string; type: 'directory' | 'file' }>> {
+  const root = await getVaultRoot();
+  const segments = relativeSegments(dirPath, true);
+  const fullPath = await inspectExistingPath(root, segments, true);
+  const stats = await fs.stat(fullPath);
+  if (!stats.isDirectory()) throw new VaultPathError('The requested vault path is not a directory.');
+
+  const entries = await fs.readdir(fullPath, { withFileTypes: true });
+  return entries
+    .filter((entry) => !entry.name.startsWith('.') && !entry.isSymbolicLink())
+    .filter((entry) => entry.isDirectory() || entry.isFile())
+    .map((entry) => ({ name: entry.name, type: entry.isDirectory() ? 'directory' as const : 'file' as const }))
+    .sort((a, b) => compareNames(a.name, b.name));
+}
+
+async function collectMarkdownFiles(directory: string, prefix = ''): Promise<string[]> {
+  const entries = await fs.readdir(directory, { withFileTypes: true });
+  const files: string[] = [];
+
+  for (const entry of entries.sort((a, b) => compareNames(a.name, b.name))) {
+    if (entry.name.startsWith('.') || entry.isSymbolicLink()) continue;
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await collectMarkdownFiles(fullPath, relative));
+    } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
+      files.push(relative);
+    }
+  }
+
+  return files;
+}
+
+export async function searchVaultFiles(
+  query: string,
+  maxResults: number,
+): Promise<{ totalMatches: number; results: Array<{ file: string; matches: string[] }> }> {
+  const root = await getVaultRoot();
+  const markdownFiles = await collectMarkdownFiles(root);
+  const needle = query.toLowerCase();
+  const results: Array<{ file: string; matches: string[] }> = [];
+  let totalMatches = 0;
+
+  for (const file of markdownFiles) {
+    const content = await fs.readFile(await existingFile(file), 'utf8');
+    const lines = content.split(/\r?\n/);
+    const matches = lines
+      .filter((line) => line.toLowerCase().includes(needle))
+      .slice(0, 3)
+      .map((line) => {
+        const trimmed = line.trim();
+        return trimmed.length > 500 ? `${trimmed.slice(0, 497)}...` : trimmed;
+      });
+
+    if (matches.length === 0) continue;
+    totalMatches += 1;
+    if (results.length < maxResults) results.push({ file, matches });
+  }
+
+  return { totalMatches, results };
+}
+
+export function toolError(operation: string, target: string, error: unknown): string {
+  if (error instanceof VaultPathError) return error.message;
+
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  const reason = code === 'ENOENT'
+    ? 'the path does not exist'
+    : code === 'EACCES' || code === 'EPERM'
+      ? 'permission was denied'
+      : code === 'ENOSPC'
+        ? 'there is not enough disk space'
+        : 'the filesystem operation failed';
+  return `${operation} failed for "${target}": ${reason}.`;
+}

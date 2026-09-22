@@ -2,25 +2,26 @@
  * vault-read.ts — Read files from the vault
  */
 
-import { tool } from 'ai';
+import { tool, type Tool } from 'ai';
 import { z } from 'zod';
-import fs from 'fs/promises';
-import path from 'path';
+import { readVaultFile, toolError } from './vault-fs.js';
 
-const VAULT_PATH = process.env.VAULT_PATH || './vault';
+type VaultReadInput = { filePath: string };
+type VaultReadOutput =
+  | { success: true; path: string; content: string; charCount: number }
+  | { success: false; error: string };
 
-export const vaultRead = tool({
+export const vaultRead: Tool<VaultReadInput, VaultReadOutput> = tool({
   description: 'Read a file from the vault. Use relative paths like "MEMORY.md" or "Work/projects/myproject.md".',
-  parameters: z.object({
-    filePath: z.string().describe('Relative path within the vault, e.g. "MEMORY.md" or "Knowledgebase/concepts/RAG.md"'),
+  inputSchema: z.object({
+    filePath: z.string().min(1).max(1024).describe('Relative path within the vault, e.g. "MEMORY.md" or "Knowledgebase/concepts/RAG.md"'),
   }),
   execute: async ({ filePath }) => {
     try {
-      const fullPath = path.join(VAULT_PATH, filePath);
-      const content = await fs.readFile(fullPath, 'utf-8');
+      const content = await readVaultFile(filePath);
       return { success: true, path: filePath, content, charCount: content.length };
-    } catch (err: any) {
-      return { success: false, error: `Cannot read ${filePath}: ${err.message}` };
+    } catch (error) {
+      return { success: false, error: toolError('Read', filePath, error) };
     }
   },
 });

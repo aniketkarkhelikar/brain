@@ -6,10 +6,11 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "tsx src/index.ts",
+    "test": "tsx --test src/tools/vault-tools.test.ts",
     "heartbeat": "tsx src/heartbeat/cron.ts",
     "test:connection": "tsx src/test-connection.ts",
     "test:agent": "tsx src/test-agent.ts",
-    "test:search": "tsx src/test-search.ts",
+    "test:search": "tsx --test src/tools/vault-tools.test.ts",
     "ingest": "tsx src/heartbeat/ingest.ts"
   },
   "dependencies": {

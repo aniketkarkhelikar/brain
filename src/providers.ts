@@ -1,12 +1,12 @@
 /**
  * providers.ts — Multi-provider model registry
  * 
- * Supports: Ollama (lab52 GPU), OpenAI, @ai-sdk/openai-compatible
- * Switch models with ACTIVE_MODEL env var: "ollama:qwen2.5:14b" or "openai:gpt-4o"
+ * Currently supports Ollama on lab52. Online providers are not wired yet.
+ * Select the configured model with ACTIVE_MODEL, e.g. "ollama:qwen2.5:14b".
  */
 
 import { createOllama } from 'ollama-ai-provider-v2';
-import type { LanguageModel } from 'ai';
+import type { EmbeddingModel, LanguageModel } from 'ai';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -26,9 +26,12 @@ export function getLanguageModel(): LanguageModel {
 
   switch (provider) {
     case 'ollama': {
-      const numCtx = parseInt(process.env.OLLAMA_NUM_CTX || '16384', 10);
-      return ollama(modelName || 'qwen2.5:14b', {
-        numCtx,
+      const numCtx = Number.parseInt(process.env.OLLAMA_NUM_CTX || '16384', 10);
+      if (!Number.isSafeInteger(numCtx) || numCtx < 1) {
+        throw new Error('OLLAMA_NUM_CTX must be a positive integer.');
+      }
+      return ollama.chat(modelName || 'qwen2.5:14b', {
+        options: { num_ctx: numCtx },
       });
     }
     case 'openai': {
@@ -42,14 +45,17 @@ export function getLanguageModel(): LanguageModel {
 }
 
 // ─── Embedding Model (for Phase 5 RAG) ─────────────────────────
-export function getEmbeddingModel() {
+export function getEmbeddingModel(): EmbeddingModel {
   return ollama.textEmbeddingModel('bge-m3');
 }
 
 // ─── Health Check ───────────────────────────────────────────────
 export async function checkOllamaHealth(): Promise<boolean> {
   try {
-    const response = await fetch(ollamaBaseUrl.replace('/api', '/api/tags'));
+    const baseUrl = ollamaBaseUrl.replace(/\/+$/, '');
+    const response = await fetch(new URL('tags', `${baseUrl}/`), {
+      signal: AbortSignal.timeout(8_000),
+    });
     return response.ok;
   } catch {
     return false;
