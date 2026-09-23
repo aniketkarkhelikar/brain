@@ -2,13 +2,13 @@
 
 Local-first AI Second Brain. The TypeScript agent uses the Vercel AI SDK with Ollama on `lab52` and a Markdown vault in `vault/`.
 
-The CLI streams responses from the configured Ollama model and saves complete conversation/tool history to `state/sessions.sqlite` (ignored by Git). Set `VAULT_PATH`, `BRAIN_SESSION_DB`, or `BRAIN_SESSION_ID` to use another vault, database, or initial session.
+The browser app streams responses from the configured Ollama model and saves complete conversation/tool history to `state/sessions.sqlite` (ignored by Git). It serves locally at `http://127.0.0.1:4173`, reads the Markdown vault, and starts the configured local heartbeat schedule. The app includes Assistant, Brain graph/base/files, hybrid search, note previews, project notes, checklist tasks, Inbox review, and background-agent status. The resumable first-run interview opens automatically when `BOOTSTRAP.md` is present. Set `VAULT_PATH`, `BRAIN_SESSION_DB`, `BRAIN_SESSION_ID`, `UI_HOST`, `UI_PORT`, or `HEARTBEAT_TIMEZONE` locally as needed.
 
 ```sh
 npm start
 ```
 
-CLI commands: `/new [name]`, `/sessions`, `/use <id>`, `/review`, `/reset`, and `/exit`. On its first run, the CLI resumes the vault's onboarding interview until `BOOTSTRAP.md` is removed. Store private calendar URLs in the local `.env` file, not in onboarding answers.
+Use `npm run cli` for the terminal chat. CLI commands: `/new [name]`, `/sessions`, `/use <id>`, `/review`, `/reset`, and `/exit`. Store private calendar URLs in the local `.env` file, not in onboarding answers. Email and calendar connectors are not implemented yet; their UI entries are intentionally marked for later.
 
 The vault tools support read, write, hybrid search, directory listing, and a deterministic catalog route. Broad inventory questions load `index.md`; other substantive prompts get a bounded application-side pre-search before the model answers. Questions answered from the already-loaded user profile skip redundant search. The model may use additional tools, but the CLI no longer fails when Qwen answers directly instead of making a forced tool call. Search routes across compact per-file profiles, exact file metadata, semantic chunk retrieval, and FTS5 keyword retrieval, then combines ranks with reciprocal-rank fusion. The file route is a candidate signal, not a gate: chunk retrieval still searches the whole selected vault scope, so details missing from a short description can still be found. Search includes several matching passages and the full text of up to three small candidate notes. The SQLite index is local and ignored by Git; only changed Markdown files are re-embedded. The generated catalog in `vault/index.md` lists each note's filename, description, and vault-relative path while preserving the human-maintained sections.
 

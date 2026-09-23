@@ -301,4 +301,54 @@ export async function runBootstrapIfNeeded(vaultPath: string, io: BootstrapIO): 
   return true;
 }
 
+export type BootstrapStatus = { required: false; complete: true } | { required: true; complete: false; index: number; total: number; prompt: string };
+
+/** Return the next resumable first-run question for browser or other interactive clients. */
+export async function getBootstrapStatus(vaultPath: string): Promise<BootstrapStatus> {
+  const bootstrapPath = path.join(vaultPath, 'BOOTSTRAP.md');
+  try { await fs.access(bootstrapPath); } catch { return { required: false, complete: true }; }
+  const userPath = path.join(vaultPath, 'USER.md');
+  const user = await fs.readFile(userPath, 'utf8').catch(() => '# USER.md — About You\n');
+  const statePath = progressPath(vaultPath);
+  const progress = await readProgress(statePath, user);
+  if (progress.complete || progress.answers.length >= questions.length) {
+    await completeOnboarding(vaultPath, statePath, progress);
+    return { required: false, complete: true };
+  }
+  return { required: true, complete: false, index: progress.answers.length, total: questions.length, prompt: questions[progress.answers.length].prompt };
+}
+
+/** Persist one validated answer using the same progress journal and finalization as the CLI interview. */
+export async function submitBootstrapAnswer(vaultPath: string, rawAnswer: string): Promise<BootstrapStatus> {
+  const status = await getBootstrapStatus(vaultPath);
+  if (!status.required) return status;
+  const answerIndex = status.index;
+  let answer = normalizedAnswer(rawAnswer);
+  if (answerIndex === 1 && answer && !/^(?:skip|skipped)$/i.test(answer) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(answer)) {
+    throw new Error('Enter a valid email address or say “skip”.');
+  }
+  if (answerIndex === 10 && /(?:https?|webcal):\/\//i.test(answer)) {
+    throw new Error('Do not enter a private calendar URL here. Record the provider only and configure the URL locally later.');
+  }
+  const normalizedLevel = normalizeProactivity(answer);
+  if (answerIndex === 11 && !normalizedLevel) throw new Error('Choose Observer, Advisor, Assistant, or Partner.');
+  if (answerIndex === 11 && normalizedLevel) answer = normalizedLevel;
+  const bootstrapPath = path.join(vaultPath, 'BOOTSTRAP.md');
+  const userPath = path.join(vaultPath, 'USER.md');
+  const user = await fs.readFile(userPath, 'utf8').catch(() => '# USER.md — About You\n');
+  const statePath = progressPath(vaultPath);
+  const progress = await readProgress(statePath, user);
+  progress.answers.push(answer || '(Skipped)');
+  await saveProgress(statePath, progress);
+  const bootstrap = await fs.readFile(bootstrapPath, 'utf8');
+  const progressLabel = `## Status: IN_PROGRESS (${progress.answers.length}/${questions.length})`;
+  const updatedBootstrap = /^## Status:.*$/m.test(bootstrap) ? bootstrap.replace(/^## Status:.*$/m, progressLabel) : `${progressLabel}\n\n${bootstrap}`;
+  await atomicWrite(bootstrapPath, updatedBootstrap);
+  if (progress.answers.length >= questions.length) {
+    await completeOnboarding(vaultPath, statePath, progress);
+    return { required: false, complete: true };
+  }
+  return { required: true, complete: false, index: progress.answers.length, total: questions.length, prompt: questions[progress.answers.length].prompt };
+}
+
 export const bootstrapQuestionCount = questions.length;

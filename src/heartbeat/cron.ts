@@ -8,25 +8,29 @@ const SCHEDULE = process.env.HEARTBEAT_CRON || '*/30 8-22 * * *';
 const TIMEZONE = process.env.HEARTBEAT_TIMEZONE || 'Asia/Kolkata';
 let activeRun: Promise<unknown> | undefined;
 
-export function startHeartbeatSchedule(options: HeartbeatOptions = {}): cron.ScheduledTask {
+export function startHeartbeatSchedule(options: HeartbeatOptions & { onStatus?: (status: string, detail?: unknown) => void } = {}): cron.ScheduledTask {
   if (!cron.validate(SCHEDULE)) throw new Error(`Invalid HEARTBEAT_CRON expression: ${SCHEDULE}`);
   const task = cron.schedule(SCHEDULE, async () => {
     if (activeRun) {
       console.log('Heartbeat skipped because the previous run is still active.');
       return;
     }
+    options.onStatus?.('started');
     activeRun = runHeartbeat({ ...options, timezone: options.timezone || TIMEZONE })
       .then((result) => {
         const stats = result.ingestion;
         console.log(`Heartbeat complete: ${stats.created} created, ${stats.updated} updated, ${stats.needsReview} need review, ${stats.failed} failed.`);
+        options.onStatus?.('completed', stats);
       })
       .catch((error) => {
         console.error(`Heartbeat failed: ${error instanceof Error ? error.message : String(error)}`);
+        options.onStatus?.('failed', error);
       })
       .finally(() => { activeRun = undefined; });
     await activeRun;
   }, { timezone: options.timezone || TIMEZONE });
   console.log(`Heartbeat scheduled (${SCHEDULE}, ${options.timezone || TIMEZONE}).`);
+  options.onStatus?.('scheduled');
   return task;
 }
 

@@ -137,7 +137,7 @@ export async function agentGenerate(
 export async function agentStream(
   prompt: string,
   history: ModelMessage[] = [],
-  options?: { maxSteps?: number }
+  options?: { maxSteps?: number; onToolActivity?: (toolName: string, input: unknown) => void }
 ): Promise<StreamTextResult<ToolSet, any, any>> {
   const model = getLanguageModel();
   const vaultContext = await loadVaultContext();
@@ -158,7 +158,8 @@ export async function agentStream(
     onStepFinish: ({ toolCalls }) => {
       if (toolCalls && toolCalls.length > 0) {
         for (const tc of toolCalls) {
-          process.stdout.write(`\n  🔧 ${tc.toolName}(${JSON.stringify(tc.input).slice(0, 80)})\n`);
+          if (options?.onToolActivity) options.onToolActivity(tc.toolName, tc.input);
+          else process.stdout.write(`\n  🔧 ${tc.toolName}(${JSON.stringify(tc.input).slice(0, 80)})\n`);
         }
       }
     },

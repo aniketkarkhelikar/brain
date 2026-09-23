@@ -336,7 +336,7 @@ The "compiler" — Karpathy's core innovation:
 
 ---
 
-### Phase 8: Chat Interface (CLI + Optional Web)
+### Phase 8: Interactive Chat (CLI)
 
 #### [NEW] `src/index.ts` — Interactive CLI
 A `readline`-based CLI that:
@@ -356,11 +356,7 @@ Loading vault context... ✓
 Based on Sarah's email from Sept 20 and the meeting notes from Sept 18...
 ```
 
-#### [NEW] (Optional, Phase 9) Web UI with Next.js
-If desired later, a Next.js frontend using `@ai-sdk/react` `useChat` hook:
-- Connects to the same agent backend
-- Shows streaming responses with tool call visibility
-- Displays vault file tree sidebar
+The local browser workspace requested later is tracked separately as Phase 10. It shares the same agent, vault, onboarding flow, session database, Inbox compiler, and heartbeat scheduler.
 
 ---
 
@@ -401,6 +397,20 @@ ollama pull all-minilm:l6-v2    # 384-dimensional embeddings for Phase 5
 # Set num_ctx globally
 # In /etc/ollama/modelfile or per-request via API
 ```
+
+---
+
+### Phase 10: Local Browser Workspace
+
+Add a local, responsive browser interface without introducing an external service or replacing the CLI.
+
+- Serve the UI and JSON/SSE API from the local Node process; default to `127.0.0.1`.
+- Stream assistant text and vault tool activity into the conversation; persist and switch SQLite-backed sessions.
+- Run the same resumable, validated first-run interview in the UI before chat is enabled.
+- Provide Brain graph/base/files views, hybrid search, safe note previews, project-folder browsing, and Markdown checklist extraction.
+- Surface Inbox review/retry, heartbeat schedule and runs, live progress, toasts, and proactive updates in the chat thread.
+- Mark email, meetings, calendar, and external apps as later integrations; do not display fabricated connected data.
+- Keep the CLI available as `npm run cli`; launch the browser workspace with `npm start`.
 
 ---
 

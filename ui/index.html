@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f5f2"><title>Second Brain</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">✳</div><div><strong>Second Brain</strong><small>PERSONAL KNOWLEDGE</small></div><button class="icon-btn sidebar-collapse" aria-label="Collapse sidebar">‹</button></div>
+    <button class="new-chat" data-action="new-chat"><span>＋</span> New conversation <kbd>⌘ K</kbd></button>
+    <nav class="nav-group" aria-label="Main navigation">
+      <div class="nav-label">WORKSPACE</div>
+      <button class="nav-item active" data-view="assistant"><span class="nav-icon">◉</span> Assistant</button>
+      <button class="nav-item" data-view="brain"><span class="nav-icon">⬡</span> Brain <span class="nav-count" id="file-count">—</span></button>
+      <button class="nav-item" data-view="projects"><span class="nav-icon">▰</span> Projects</button>
+      <button class="nav-item" data-view="inbox"><span class="nav-icon">↳</span> Inbox <span class="nav-count" id="review-count">0</span></button>
+      <button class="nav-item" data-view="tasks"><span class="nav-icon">☷</span> Tasks</button>
+      <button class="nav-item" data-view="agents"><span class="nav-icon">✧</span> Background agents</button>
+      <div class="nav-label nav-label-spaced">CONNECTORS</div>
+      <button class="nav-item muted" data-view="email"><span class="nav-icon">✉</span> Email <span class="soon">LATER</span></button>
+      <button class="nav-item muted" data-view="meetings"><span class="nav-icon">◷</span> Meetings <span class="soon">LATER</span></button>
+      <button class="nav-item muted" data-view="calendar"><span class="nav-icon">▦</span> Calendar <span class="soon">LATER</span></button>
+      <button class="nav-item muted" data-view="apps"><span class="nav-icon">⊞</span> Apps <span class="soon">LATER</span></button>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="sidebar-status"><span class="status-dot"></span><div><strong>Brain is ready</strong><small id="model-name">Connecting…</small></div></div>
+      <button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span> Settings</button>
+      <div class="profile"><div class="avatar">B</div><div class="profile-copy"><strong>Your workspace</strong><small id="vault-name">Local vault</small></div><button class="icon-btn" data-view="settings">···</button></div>
+    </div>
+  </aside>
+  <main class="main-area">
+    <header class="topbar"><div class="breadcrumbs"><span class="crumb-home">✳</span><span class="crumb-sep">/</span><span id="crumb-current">Assistant</span></div><div class="top-actions"><span class="sync-indicator"><i></i><span id="connection-label">Local · Ready</span></span><button class="icon-btn" title="Search brain" data-action="open-search">⌕</button><button class="icon-btn" title="Settings" data-view="settings">⚙</button></div></header>
+    <section class="view active" id="view-assistant">
+      <div class="assistant-layout">
+        <div class="conversation-column">
+          <div class="conversation-head"><div><div class="eyebrow">YOUR SECOND BRAIN</div><h1 id="chat-title">A little more room to think.</h1><p id="chat-subtitle">Ask about your notes, connect the dots, or get something off your mind.</p></div><button class="session-picker" id="session-picker">Assistant <span>⌄</span></button></div>
+          <div class="conversation-scroll" id="conversation-scroll">
+            <div class="welcome" id="welcome">
+              <div class="welcome-orb"><span>✳</span></div><div class="welcome-title">Good to have you here.</div><p>Your notes are ready when you are.</p>
+              <div class="suggestion-grid"><button class="suggestion" data-prompt="What should I know about my active projects?"><span class="suggestion-icon">↗</span><span><strong>Get the lay of the land</strong><small>What’s moving in my projects?</small></span><b>→</b></button><button class="suggestion" data-prompt="Find connections between my recent notes."><span class="suggestion-icon">⌘</span><span><strong>Find a connection</strong><small>Connect ideas across my notes</small></span><b>→</b></button><button class="suggestion" data-prompt="What needs my attention in the inbox?"><span class="suggestion-icon">✧</span><span><strong>Clear a loose end</strong><small>What’s waiting in my inbox?</small></span><b>→</b></button></div>
+            </div>
+            <div id="messages" class="messages"></div>
+          </div>
+          <div class="composer-wrap"><div class="composer"><textarea id="prompt" rows="1" placeholder="Ask anything about your brain…" aria-label="Message"></textarea><div class="composer-bottom"><div class="composer-left"><button class="icon-btn" title="Attach a note" data-action="open-brain">＋</button><span class="mode-chip"><span class="mode-spark">✳</span> Brain-aware</span></div><div class="composer-right"><span id="composer-model">Qwen · Local</span><button id="send" class="send-btn" aria-label="Send message">↑</button></div></div></div><div class="composer-note">Your thoughts stay in your local vault.</div></div>
+        </div>
+        <aside class="activity-rail"><div class="rail-head"><div><div class="eyebrow">IN THE BACKGROUND</div><h2>While you think</h2></div><button class="icon-btn" id="activity-refresh" title="Refresh activity">↻</button></div>
+          <div class="heartbeat-card"><div class="heartbeat-top"><span class="heartbeat-icon">✧</span><span class="live-pill"><i></i> ON TRACK</span></div><strong>Your brain, kept in motion.</strong><p>New notes are quietly sorted and woven into what you already know.</p><div class="heartbeat-meta"><span id="schedule-label">Every 30 minutes</span><span id="heartbeat-time">Local schedule</span></div><button class="text-button" id="run-heartbeat">Run a check now <span>→</span></button></div>
+          <div class="rail-section"><div class="rail-section-head"><span>NEEDS YOUR EYE</span><span id="attention-total">0</span></div><div id="attention-list" class="attention-list"><div class="empty-rail">Nothing waiting. You’re all caught up.</div></div></div>
+          <div class="rail-section"><div class="rail-section-head"><span>RECENT ACTIVITY</span><button class="quiet-button" data-view="inbox">See all</button></div><div id="recent-activity" class="recent-activity"><div class="activity-entry"><span class="activity-marker"></span><div><strong>Brain is ready</strong><small>Your local assistant is standing by</small></div><time>now</time></div></div></div>
+          <div class="rail-footer"><span class="shield">◈</span><span>Private by design</span><span class="footer-dot">·</span><span>Stored on this device</span></div>
+        </aside>
+      </div>
+    </section>
+    <section class="view" id="view-brain"><div class="page-content"><div class="page-heading"><div><div class="eyebrow">YOUR KNOWLEDGE</div><h1>Brain</h1><p>A living map of everything you’ve saved and learned.</p></div><div class="segmented"><button class="selected" data-brain-tab="graph">Graph</button><button data-brain-tab="base">Base</button><button data-brain-tab="files">Files</button></div></div><div class="brain-toolbar"><label class="searchbox"><span>⌕</span><input id="brain-search" placeholder="Search notes and ideas…"><kbd>↵</kbd></label><span id="brain-results-label" class="subtle">Loading your notes…</span></div><div id="brain-panel" class="brain-panel"></div></div></section>
+    <section class="view" id="view-projects"><div class="page-content"><div class="eyebrow">ACTIVE WORK</div><div class="page-heading"><div><h1>Projects</h1><p>Project context already in your local brain.</p></div><button class="secondary-button" data-view="brain">Browse all notes →</button></div><div id="projects-panel" class="file-grid"></div></div></section>
+    <section class="view" id="view-inbox"><div class="page-content"><div class="eyebrow">INBOX COMPILER</div><div class="page-heading"><div><h1>Review queue</h1><p>Items the brain held back because they need your judgment.</p></div><button class="primary-button" id="ingest-now">✧ &nbsp;Process inbox</button></div><div id="review-panel" class="review-panel"></div></div></section>
+    <section class="view" id="view-tasks"><div class="page-content"><div class="eyebrow">FOLLOW THROUGH</div><div class="page-heading"><div><h1>Tasks</h1><p>Open checklists found in your Markdown notes.</p></div><button class="secondary-button" data-view="inbox">Review inbox →</button></div><div id="tasks-panel" class="tasks-panel"><div class="empty-state">Finding open checklists…</div></div><p class="subtle task-note">Tasks stay in their original notes. Select a row to inspect its source.</p></div></section>
+    <section class="view" id="view-agents"><div class="page-content"><div class="eyebrow">LOCAL AUTOMATION</div><div class="page-heading"><div><h1>Background agents</h1><p>See when your brain checks in and what it changed.</p></div><button class="primary-button" id="agent-run">✧ &nbsp;Run brain check</button></div><div class="agent-status-card"><div class="agent-orb">✧</div><div class="agent-status-copy"><div class="agent-status-line"><strong id="agent-status-title">Automatic check is scheduled</strong><span class="connection-badge"><i></i> ACTIVE</span></div><p id="agent-status-copy">The agent checks your local Inbox and updates its daily log during your active hours.</p><div class="agent-schedule"><span>Schedule <strong id="agent-schedule-text">—</strong></span><span>Timezone <strong id="agent-timezone-text">—</strong></span></div></div></div><div class="agent-columns"><div><div class="rail-section-head agent-heading">RECENT RUNS</div><div id="agent-activity" class="agent-activity"><div class="empty-state">No runs yet. Your schedule is active.</div></div></div><div class="agent-side-card"><div class="eyebrow">INBOX COMPILER</div><h2>New notes, thoughtfully sorted.</h2><p>Inbox Markdown is routed into your existing knowledge, with ambiguous items held for review.</p><button class="secondary-button" id="agent-ingest">Process Inbox →</button><button class="text-button" data-view="inbox">See review queue →</button></div></div></div></section>
+    <section class="view" id="view-settings"><div class="page-content"><div class="eyebrow">YOUR SPACE</div><h1>Settings</h1><p class="page-lede">A clear view of what’s connected and where your brain lives.</p><div class="settings-grid"><article class="settings-card"><div class="settings-icon">✳</div><div><h2>Assistant model</h2><p id="settings-model">Loading model…</p></div><span class="connection-badge"><i></i> Local</span></article><article class="settings-card"><div class="settings-icon">⬡</div><div><h2>Knowledge vault</h2><p id="settings-vault">Loading vault…</p></div><span class="connection-badge"><i></i> Ready</span></article><article class="settings-card"><div class="settings-icon">◷</div><div><h2>Brain check</h2><p id="settings-schedule">Loading schedule…</p></div><button class="secondary-button compact" id="settings-run">Run now</button></article><article class="settings-card disabled-card"><div class="settings-icon">⌁</div><div><h2>Email & calendar</h2><p>Connectors are planned for a later phase. Your current brain check works with local notes.</p></div><span class="later-badge">COMING LATER</span></article></div><div class="privacy-note"><span>◈</span><div><strong>Local first, always.</strong><p>Chat history, notes, and review data are read from your local vault and session database.</p></div></div></div></section>
+    <section class="view" id="view-email"><div class="page-content"><div class="eyebrow">CONNECTOR</div><h1>Email</h1><div class="placeholder-card"><h2>Email will join your brain soon.</h2><p>Email integration is intentionally deferred. Search, notes, chat, and local Inbox processing are ready today.</p><span class="later-badge">COMING LATER</span></div></div></section>
+    <section class="view" id="view-meetings"><div class="page-content"><div class="eyebrow">CONNECTOR</div><h1>Meetings</h1><div class="placeholder-card"><h2>Meeting notes, when you’re ready.</h2><p>This space will connect meeting context after integrations are added.</p><span class="later-badge">COMING LATER</span></div></div></section>
+    <section class="view" id="view-calendar"><div class="page-content"><div class="eyebrow">CONNECTOR</div><h1>Calendar</h1><div class="placeholder-card"><h2>Your schedule, in a later phase.</h2><p>Calendar access isn’t connected. No events are being shown or inferred.</p><span class="later-badge">COMING LATER</span></div></div></section>
+    <section class="view" id="view-apps"><div class="page-content"><div class="eyebrow">CONNECTORS</div><h1>Apps</h1><div class="placeholder-card"><h2>Your tools, when integrations arrive.</h2><p>External app connections are planned for a later phase.</p><span class="later-badge">COMING LATER</span></div></div></section>
+  </main>
+</div>
+<div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+<div id="modal" class="modal-backdrop" hidden><div class="modal-card"><button class="icon-btn modal-close" aria-label="Close">×</button><div class="eyebrow">YOUR BRAIN</div><h2 id="modal-title">Note</h2><div id="modal-content" class="modal-content"></div></div></div>
+<div id="onboarding-modal" class="modal-backdrop onboarding-backdrop" hidden><form id="onboarding-form" class="onboarding-card"><div class="onboarding-brand"><span class="brand-mark">✳</span><span class="eyebrow">A MORE PERSONAL BRAIN</span></div><div class="onboarding-progress"><span id="onboarding-progress-label">STEP 1 OF 12</span><div><i id="onboarding-progress-bar"></i></div></div><h2>Let’s make this feel like yours.</h2><p id="onboarding-prompt" class="onboarding-prompt">A few short questions help your assistant understand how you like to work.</p><label class="onboarding-answer-label" for="onboarding-answer">YOUR ANSWER</label><textarea id="onboarding-answer" rows="3" placeholder="Type your answer…"></textarea><div id="onboarding-error" class="onboarding-error"></div><div class="onboarding-actions"><span>You can answer “skip” at any step.</span><button class="primary-button" id="onboarding-next">Continue →</button></div></form></div>
+<script type="module" src="/app.js"></script>
+</body></html>

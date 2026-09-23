@@ -1,10 +1,10 @@
 # AI Second Brain — Task Tracker
 
-**Status:** Core phases 1, 2 (Ollama/Qwen path), 3, 5, 6 (vault-only heartbeat/compiler), and 8 complete; external integrations and Phase 9 security/deployment are deferred
+**Status:** Core phases 1, 2 (Ollama/Qwen path), 3, 5, 6 (vault-only heartbeat/compiler), 8, and 10 (local browser workspace) complete; external integrations and Phase 9 security/deployment are deferred
 **Model:** `qwen2.5:14b` on lab52 (`172.25.128.20`)  
 **Interface:** CLI  
 **Started:** 2026-09-23
-**Checkpoint:** `4e41a5c` (`build phase 8 interactive CLI and sessions`, pushed to `origin/main`); Phase 5 search, onboarding fixes, deterministic retrieval routing, and Phase 6 are implemented in the current working tree and are not yet committed
+**Checkpoint:** `9410cf9` (`Complete phases 1, 2, 3, 5, 6, 8`, pushed to `origin/main`); Phase 10 local browser workspace is implemented and verified in the current working tree
 
 **Verified stack:** Node.js 22, TypeScript 5.9, Vercel AI SDK 7.0.111
 
@@ -111,6 +111,16 @@
 - [ ] Harden `.env` handling (no secrets in vault)
 - [ ] **TEST:** Concurrent heartbeat + CLI don't corrupt files
 - [ ] **TEST:** Agent refuses to expose API keys
+
+## Phase 10: Local Browser Workspace
+- [x] Build a responsive, local-first app shell with Assistant, Brain, Projects, Inbox, Tasks, Background agents, Settings, and clearly deferred connector screens
+- [x] Stream assistant replies and vault-tool activity into persistent SQLite sessions
+- [x] Reuse the resumable, validated first-run onboarding in the browser before enabling chat
+- [x] Add Brain Graph/Base/Files views, hybrid search, note previews, project-folder browsing, and Markdown checklist extraction
+- [x] Integrate Inbox review/retry, scheduled/manual heartbeat status, SSE activity updates, proactive chat cards, and bottom-left toasts
+- [x] Preserve the CLI at `npm run cli`; make `npm start` launch the browser workspace and local schedule
+- [x] **TEST:** TypeScript strict check; full regression suite (43 passed); browser/API smoke checks for overview, onboarding, files, tasks, review queue, and cross-origin rejection
+- [x] **TEST:** Browser verified responsive landing state and resumable onboarding step without answering on the user's behalf
 
 ---
 

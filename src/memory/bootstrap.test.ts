@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
-import { bootstrapQuestionCount, runBootstrapIfNeeded } from './bootstrap.js';
+import { bootstrapQuestionCount, getBootstrapStatus, runBootstrapIfNeeded, submitBootstrapAnswer } from './bootstrap.js';
 
 async function makeVault(): Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-brain-bootstrap-'));
@@ -16,6 +16,28 @@ async function makeVault(): Promise<string> {
 }
 
 describe('Phase 8 first-run onboarding', () => {
+  it('exposes resumable browser questions, validates answers, and finalizes through the same journal', async () => {
+    const vault = await makeVault();
+    try {
+      let status = await getBootstrapStatus(vault);
+      assert.deepEqual(status, { required: true, complete: false, index: 0, total: 12, prompt: 'What name should I use for you?' });
+      const answers = ['Riley', 'riley@example.test', 'Engineer', 'Brain app', 'Short and warm', 'Offer ideas', '9 AM–5 PM IST', 'None', 'None', 'Skip', 'Skip', 'Advisor'];
+      for (const [index, answer] of answers.entries()) {
+        if (index === 1) await assert.rejects(submitBootstrapAnswer(vault, 'not an email'), /valid email address/);
+        if (index === 10) await assert.rejects(submitBootstrapAnswer(vault, 'https://private.example/calendar'), /private calendar URL/);
+        if (index === 11) await assert.rejects(submitBootstrapAnswer(vault, 'Owner'), /Choose Observer/);
+        status = await submitBootstrapAnswer(vault, answer);
+        assert.equal(status.required, index < answers.length - 1);
+      }
+      assert.deepEqual(status, { required: false, complete: true });
+      assert.match(await fs.readFile(path.join(vault, 'USER.md'), 'utf8'), /Riley/);
+      assert.match(await fs.readFile(path.join(vault, 'SOUL.md'), 'utf8'), /Selected level: \*\*Advisor\*\*/);
+      await assert.rejects(fs.access(path.join(vault, 'BOOTSTRAP.md')));
+    } finally {
+      await fs.rm(path.dirname(vault), { recursive: true, force: true });
+    }
+  });
+
   it('resumes after interruption, saves each answer, updates proactivity, logs, and removes the trigger', async () => {
     const vault = await makeVault();
     try {

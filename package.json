@@ -5,7 +5,7 @@
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
-    "start": "tsx src/index.ts",
+    "start": "tsx src/ui/server.ts",
     "test": "tsx --test src/tools/vault-tools.test.ts src/memory/session.test.ts src/memory/bootstrap.test.ts src/memory/search.test.ts src/heartbeat/ingest.test.ts src/cli.test.ts",
     "index:vault": "tsx src/memory/index-vault.ts",
     "test:embeddings": "tsx src/test-embeddings.ts",
@@ -15,7 +15,9 @@
     "test:connection": "tsx src/test-connection.ts",
     "test:agent": "tsx src/test-agent.ts",
     "test:search": "tsx --test src/tools/vault-tools.test.ts",
-    "ingest": "tsx src/heartbeat/ingest.ts"
+    "ingest": "tsx src/heartbeat/ingest.ts",
+    "cli": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@ai-sdk/openai": "^2.0.0",
