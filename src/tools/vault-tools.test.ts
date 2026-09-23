@@ -5,11 +5,13 @@ import path from 'node:path';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { type Tool, type ModelMessage } from 'ai';
 import { z } from 'zod';
-import { allTools, loadVaultContext } from '../agent.js';
+import { allTools, initialVaultRoute, loadVaultContext } from '../agent.js';
 import { vaultList } from './vault-list.js';
 import { vaultRead } from './vault-read.js';
-import { vaultSearch } from './vault-search.js';
+import { createVaultSearchTool, vaultSearch } from './vault-search.js';
+import { readVaultFileIfSmall, searchVaultFiles } from './vault-fs.js';
 import { vaultWrite } from './vault-write.js';
+import { vaultCatalog } from './vault-catalog.js';
 
 let tempRoot = '';
 let vaultRoot = '';
@@ -17,6 +19,26 @@ let outsideFile = '';
 let previousVaultPath: string | undefined;
 
 const toolOptions = { toolCallId: 'test-call', messages: [] as ModelMessage[], context: {} };
+const lexicalTestSearch = createVaultSearchTool(async (query, maxResults) => {
+  const { totalMatches, results } = await searchVaultFiles(query, maxResults);
+  return {
+    success: true,
+    query,
+    totalMatches,
+    truncated: totalMatches > results.length,
+    results: results.map(({ file, matches }) => ({
+      file,
+      path: file,
+      title: file,
+      description: '',
+      tags: [],
+      chunkIndex: 0,
+      score: 1,
+      snippet: matches[0] ?? '',
+      matches,
+    })),
+  };
+});
 
 async function runTool(definition: Tool, input: unknown): Promise<unknown> {
   const parsedInput = (definition.inputSchema as z.ZodType).parse(input);
@@ -64,12 +86,27 @@ describe('Phase 3 vault tools', () => {
     await fs.rm(tempRoot, { recursive: true, force: true });
   });
 
-  it('registers all four tools in the agent and loads the configured vault context', async () => {
-    assert.deepEqual(Object.keys(allTools).sort(), ['vaultList', 'vaultRead', 'vaultSearch', 'vaultWrite'].sort());
+  it('registers the vault inventory route and loads the configured vault context', async () => {
+    assert.deepEqual(Object.keys(allTools).sort(), ['vaultCatalog', 'vaultList', 'vaultRead', 'vaultSearch', 'vaultWrite'].sort());
     const context = await loadVaultContext();
     assert.match(context, /=== SOUL\.md === \(not found\)/);
     assert.match(context, /=== MEMORY\.md ===/);
     assert.match(context, /Graph knowledge/);
+  });
+
+  it('reads the full generated catalog and deterministically routes inventory prompts to it', async () => {
+    await fs.writeFile(path.join(vaultRoot, 'index.md'), '# Vault Index\n\n| Project | Description |\n| --- | --- |\n| Launch | Current launch project |\n');
+    assert.deepEqual(await runTool(vaultCatalog, {}), {
+      success: true,
+      path: 'index.md',
+      content: '# Vault Index\n\n| Project | Description |\n| --- | --- |\n| Launch | Current launch project |\n',
+    });
+    assert.equal(initialVaultRoute('What projects am I working on?'), 'vaultCatalog');
+    assert.equal(initialVaultRoute('What did I decide about the database?'), 'vaultSearch');
+    assert.equal(initialVaultRoute('What do you know about me?'), undefined);
+    assert.equal(initialVaultRoute('What is my communication style?'), undefined);
+    assert.equal(initialVaultRoute('Use vaultSearch to find the database decision.'), undefined);
+    assert.equal(initialVaultRoute('hello'), undefined);
   });
 
   it('reads existing files and returns a safe error for missing files', async () => {
@@ -79,6 +116,8 @@ describe('Phase 3 vault tools', () => {
       content: '# Graph knowledge\nA persistent structured wiki.\nA [[graph]] connects useful concepts.\nThe structured wiki grows over time.\n',
       charCount: 123,
     });
+    assert.equal(await readVaultFileIfSmall('MEMORY.md', 123), '# Graph knowledge\nA persistent structured wiki.\nA [[graph]] connects useful concepts.\nThe structured wiki grows over time.\n');
+    assert.equal(await readVaultFileIfSmall('MEMORY.md', 122), undefined);
     const missing = await runTool(vaultRead, { filePath: 'missing.md' }) as { success: boolean; error: string };
     assert.equal(missing.success, false);
     assert.match(missing.error, /does not exist/);
@@ -142,7 +181,7 @@ describe('Phase 3 vault tools', () => {
   });
 
   it('searches markdown recursively without case sensitivity, caps snippets and reports truncation accurately', async () => {
-    const result = await runTool(vaultSearch, { query: 'STRUCTURED WIKI', maxResults: 1 }) as {
+    const result = await runTool(lexicalTestSearch, { query: 'STRUCTURED WIKI', maxResults: 1 }) as {
       success: boolean;
       totalMatches: number;
       truncated: boolean;
@@ -154,7 +193,7 @@ describe('Phase 3 vault tools', () => {
     assert.equal(result.results.length, 1);
     assert.equal(result.results[0].file, 'Knowledgebase/concepts/graph.md');
 
-    const full = await runTool(vaultSearch, { query: 'structured wiki' }) as {
+    const full = await runTool(lexicalTestSearch, { query: 'structured wiki' }) as {
       totalMatches: number;
       truncated: boolean;
       results: Array<{ file: string; matches: string[] }>;
@@ -163,12 +202,12 @@ describe('Phase 3 vault tools', () => {
     assert.equal(full.truncated, false);
     assert.equal(full.results.length, 3);
 
-    const outsideOnly = await runTool(vaultSearch, { query: 'outside secret' }) as { totalMatches: number };
+    const outsideOnly = await runTool(lexicalTestSearch, { query: 'outside secret' }) as { totalMatches: number };
     assert.equal(outsideOnly.totalMatches, 0);
   });
 
   it('validates search inputs and supplies bounded defaults', () => {
-    const searchSchema = vaultSearch.inputSchema as z.ZodType;
+    const searchSchema = lexicalTestSearch.inputSchema as z.ZodType;
     const writeSchema = vaultWrite.inputSchema as z.ZodType;
     assert.equal(searchSchema.safeParse({ query: '   ' }).success, false);
     assert.equal(searchSchema.safeParse({ query: 'wiki', maxResults: 0 }).success, false);

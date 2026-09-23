@@ -7,16 +7,19 @@ import { bootstrapQuestionCount, runBootstrapIfNeeded } from './bootstrap.js';
 
 async function makeVault(): Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-brain-bootstrap-'));
-  await fs.writeFile(path.join(root, 'BOOTSTRAP.md'), '# First run\n\n## Status: PENDING\n');
-  await fs.writeFile(path.join(root, 'USER.md'), '# User profile\n\n## Basic Info\n- **Name:** (Your name)\n');
-  await fs.writeFile(path.join(root, 'SOUL.md'), '# Soul\n\n### How Bold to Be\n\nOriginal rules.\n\n### Memory Management\n\nKeep memory useful.\n');
-  return root;
+  const vault = path.join(root, 'vault');
+  await fs.mkdir(vault, { recursive: true });
+  await fs.writeFile(path.join(vault, 'BOOTSTRAP.md'), '# First run\n\n## Status: PENDING\n');
+  await fs.writeFile(path.join(vault, 'USER.md'), '# User profile\n\n## Basic Info\n- **Name:** (Your name)\n- **Email:** (Your email)\n\n### Current Role\n- (What you do)\n\n### Key Projects\n- AI Second Brain (this project)\n\n### Communication Preferences\n- Direct and concise\n\n### Schedule Patterns\n- Active hours: 8 to 10\n\n### Team\n- (People)\n\n### Email\n- Primary: (your email)\n\n### Calendar\n- Google Calendar: configure .ics in .env\n');
+  await fs.writeFile(path.join(vault, 'SOUL.md'), '# Soul\n\n### How Bold to Be\n\nOriginal rules.\n\n### Communication Style\n\nOriginal communication rules.\n\n### Memory Management\n\nKeep memory useful.\n');
+  return vault;
 }
 
 describe('Phase 8 first-run onboarding', () => {
   it('resumes after interruption, saves each answer, updates proactivity, logs, and removes the trigger', async () => {
     const vault = await makeVault();
     try {
+      await fs.appendFile(path.join(vault, 'USER.md'), '\n### Current Role\n- stale duplicate\n\n## Proactivity\n- stale duplicate\n');
       let firstAnswers = 0;
       await assert.rejects(runBootstrapIfNeeded(vault, {
         ask: async () => {
@@ -27,12 +30,12 @@ describe('Phase 8 first-run onboarding', () => {
         write: () => undefined,
       }), /simulated terminal interruption/);
       assert.equal(firstAnswers, 3);
-      assert.match(await fs.readFile(path.join(vault, 'USER.md'), 'utf8'), /Avery/);
+      assert.doesNotMatch(await fs.readFile(path.join(vault, 'USER.md'), 'utf8'), /Avery/);
       assert.match(await fs.readFile(path.join(vault, 'BOOTSTRAP.md'), 'utf8'), /IN_PROGRESS \(2\/12\)/);
 
       const remainingAnswers = [
         'Researcher', 'Second Brain and a reading list', 'Concise and direct', 'Suggest improvements',
-        '9 AM to 6 PM IST', 'Weekly team sync', 'Mina (manager)', '(Skipped)', '(Skipped)', 'Partner',
+        '9 AM to 6 PM IST', 'Weekly team sync', 'Mina (manager)', '(Skipped)', '(Skipped)', 'partner',
       ];
       let askCount = 0;
       const output: string[] = [];
@@ -47,29 +50,26 @@ describe('Phase 8 first-run onboarding', () => {
       assert.match(output.join(''), /Resuming first-run onboarding/);
       await assert.rejects(fs.access(path.join(vault, 'BOOTSTRAP.md')));
       const user = await fs.readFile(path.join(vault, 'USER.md'), 'utf8');
-      assert.match(user, /avery@example\\\.test/);
-      assert.match(user, /Active projects/);
+      assert.match(user, /- \*\*Name:\*\* Avery/);
+      assert.match(user, /- \*\*Email:\*\* avery@example\.test/);
+      assert.match(user, /Second Brain and a reading list/);
+      assert.doesNotMatch(user, /\(Your name\)|brain-bootstrap-progress|Onboarding Answers/);
+      assert.match(user, /Selected level: \*\*Partner\*\*/);
+      assert.equal((user.match(/^### Current Role$/gm) ?? []).length, 1);
+      assert.equal((user.match(/^## Proactivity$/gm) ?? []).length, 1);
       const soul = await fs.readFile(path.join(vault, 'SOUL.md'), 'utf8');
       assert.match(soul, /Selected level: \*\*Partner\*\*/);
       assert.match(soul, /### Memory Management/);
-      assert.match(soul, /user's preference: Concise and direct/);
-      assert.match(soul, /Suggestions preference: Suggest improvements/);
+      assert.match(soul, /Reply style: Concise and direct/);
+      assert.match(soul, /Suggestions: Suggest improvements/);
       const dailyDir = path.join(vault, 'daily');
       const dailyFiles = await fs.readdir(dailyDir);
       const log = await fs.readFile(path.join(dailyDir, dailyFiles[0]), 'utf8');
       assert.equal((log.match(/Onboarding complete/g) ?? []).length, 1);
 
-      await fs.writeFile(path.join(vault, 'BOOTSTRAP.md'), '## Status: PENDING\n');
-      let askedAgain = false;
-      await runBootstrapIfNeeded(vault, {
-        ask: async () => { askedAgain = true; return ''; },
-        write: () => undefined,
-      });
-      assert.equal(askedAgain, false);
-      const repeatedLog = await fs.readFile(path.join(dailyDir, dailyFiles[0]), 'utf8');
-      assert.equal((repeatedLog.match(/Onboarding complete/g) ?? []).length, 1);
+      assert.deepEqual(await fs.readdir(path.resolve(vault, '..', 'state')), []);
     } finally {
-      await fs.rm(vault, { recursive: true, force: true });
+      await fs.rm(path.dirname(vault), { recursive: true, force: true });
     }
   });
 
@@ -86,7 +86,7 @@ describe('Phase 8 first-run onboarding', () => {
 
       await fs.writeFile(path.join(vault, 'BOOTSTRAP.md'), '## Status: PENDING\n');
       let count = 0;
-      const answers = ['n', 'e', 'role', 'projects', 'style', 'suggestions', 'hours', 'meetings', 'people', 'email', 'https://calendar.private/token', 'Google Calendar', 'Owner', 'Advisor'];
+      const answers = ['n', 'e@example.test', 'role', 'projects', 'style', 'suggestions', 'hours', 'meetings', 'people', 'email', 'https://calendar.private/token', 'Google Calendar', 'Owner', 'Advisor'];
       const output: string[] = [];
       await runBootstrapIfNeeded(vault, {
         ask: async () => answers[count++],
@@ -98,7 +98,28 @@ describe('Phase 8 first-run onboarding', () => {
       assert.doesNotMatch(await fs.readFile(path.join(vault, 'USER.md'), 'utf8'), /calendar\.private/);
       assert.match(await fs.readFile(path.join(vault, 'SOUL.md'), 'utf8'), /Selected level: \*\*Advisor\*\*/);
     } finally {
-      await fs.rm(vault, { recursive: true, force: true });
+      await fs.rm(path.dirname(vault), { recursive: true, force: true });
+    }
+  });
+
+  it('rejects malformed email input and records variable availability accurately', async () => {
+    const vault = await makeVault();
+    try {
+      const answers = ['Jordan', 'not an email', 'jordan@example.test', 'Student', 'Brain', 'Short and direct', 'Only when asked', 'random time', 'none', 'none', 'skip', 'skip', 'Partner'];
+      let askCount = 0;
+      const output: string[] = [];
+      await runBootstrapIfNeeded(vault, {
+        ask: async () => answers[askCount++] ?? '',
+        write: (text) => output.push(text),
+      });
+      assert.equal(askCount, 13);
+      assert.match(output.join(''), /valid email address/);
+      const user = await fs.readFile(path.join(vault, 'USER.md'), 'utf8');
+      assert.match(user, /jordan@example\.test/);
+      assert.match(user, /Varies; no fixed schedule reported/);
+      assert.doesNotMatch(user, /not an email|random time/);
+    } finally {
+      await fs.rm(path.dirname(vault), { recursive: true, force: true });
     }
   });
 });

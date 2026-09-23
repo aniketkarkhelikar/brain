@@ -1,6 +1,7 @@
 import type { ModelMessage } from 'ai';
 import { runBootstrapIfNeeded } from './memory/bootstrap.js';
 import { compactHistory, DEFAULT_SESSION_ID, SessionStore } from './memory/session.js';
+import { ingestInbox, listInboxReviewQueue } from './heartbeat/ingest.js';
 
 export type CliIO = {
   ask: (prompt: string) => Promise<string>;
@@ -38,7 +39,45 @@ export async function runCli(runtime: CliRuntime): Promise<void> {
       return;
     }
     if (prompt === '/help') {
-      write('Commands: /new [name], /use <id>, /sessions, /reset, /exit\n\n');
+      write('Commands: /new [name], /use <id>, /sessions, /review, /reset, /exit\n\n');
+      continue;
+    }
+    if (prompt === '/review') {
+      try {
+        const queue = await listInboxReviewQueue(vaultPath);
+        if (!queue.length) {
+          write('Inbox review queue is empty.\n\n');
+          continue;
+        }
+        write(`Inbox review queue (${queue.length}):\n${queue.map((item, index) => `${index + 1}. ${item.source} [${item.status}] — ${item.message}`).join('\n')}\n`);
+        const selection = (await ask('Choose a note number to resolve, or 0 to cancel.\n> ')).trim();
+        const index = Number(selection) - 1;
+        if (selection === '0') {
+          write('Review cancelled.\n\n');
+          continue;
+        }
+        if (!Number.isInteger(index) || index < 0 || index >= queue.length) {
+          write('Invalid selection. Run /review to see the queue again.\n\n');
+          continue;
+        }
+        const selected = queue[index];
+        const guidance = (await ask(`How should I resolve ${selected.source}? Give an exact destination path or a short correction; say "cancel" to leave it parked.\n> `)).trim();
+        if (!guidance || /^(?:cancel|skip)$/i.test(guidance)) {
+          write('Note left in the review queue.\n\n');
+          continue;
+        }
+        const result = await ingestInbox({
+          vaultPath,
+          retryNeedsReview: true,
+          sourcePaths: [selected.source],
+          reviewGuidance: { [selected.source]: guidance },
+        });
+        const item = result.items[0];
+        if (!item) write('No result was returned for the selected note.\n\n');
+        else write(`${item.decision}: ${item.source}${item.targetPaths?.length ? ` → ${item.targetPaths.join(', ')}` : item.targetPath ? ` → ${item.targetPath}` : ''}${item.message ? ` (${item.message})` : ''}\n\n`);
+      } catch (error) {
+        write(`Review failed: ${error instanceof Error ? error.message : String(error)}\n\n`);
+      }
       continue;
     }
     if (prompt === '/sessions') {

@@ -91,6 +91,28 @@ describe('Phase 8 interactive CLI', () => {
     store.close();
   });
 
+  it('shows reviewable Inbox items without retrying them unless the user selects one', async () => {
+    const vaultPath = path.join(tempDir, 'vault-review-queue');
+    await fs.mkdir(path.join(vaultPath, 'Inbox', 'notes'), { recursive: true });
+    await fs.writeFile(path.join(vaultPath, 'Inbox', 'notes', 'ambiguous.md'), '---\ningestion_status: needs_review\ningestion_note: Two server notes match.\n---\n\nCheck server 2.\n');
+    const store = new SessionStore(dbPath);
+    const inputs = ['/review', '0', '/exit'];
+    const output: string[] = [];
+    let modelCalled = false;
+    await runCli({
+      vaultPath,
+      store,
+      ask: async () => inputs.shift() ?? '/exit',
+      write: (text) => output.push(text),
+      respond: async () => { modelCalled = true; return []; },
+    });
+    assert.match(output.join(''), /Inbox review queue \(1\)/);
+    assert.match(output.join(''), /Two server notes match/);
+    assert.match(output.join(''), /Review cancelled/);
+    assert.equal(modelCalled, false);
+    store.close();
+  });
+
   it('runs the onboarding interview before accepting chat messages', async () => {
     const vaultPath = path.join(tempDir, 'vault-bootstrap-cli');
     await fs.mkdir(vaultPath, { recursive: true });

@@ -99,6 +99,21 @@ export async function readVaultFile(filePath: string): Promise<string> {
   return fs.readFile(await existingFile(filePath), 'utf8');
 }
 
+export async function readVaultFileIfSmall(filePath: string, maxBytes: number): Promise<string | undefined> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error('maxBytes must be a positive safe integer.');
+  const fullPath = await existingFile(filePath);
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  const handle = await fs.open(fullPath, fsConstants.O_RDONLY | noFollow);
+  try {
+    const buffer = Buffer.alloc(maxBytes + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > maxBytes) return undefined;
+    return buffer.subarray(0, bytesRead).toString('utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
 async function safeWritePath(filePath: string): Promise<string> {
   const root = await getVaultRoot();
   const segments = relativeSegments(filePath);

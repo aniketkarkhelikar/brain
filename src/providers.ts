@@ -13,6 +13,8 @@ dotenv.config();
 
 // ─── Ollama Provider (→ lab52 GPU server) ───────────────────────
 const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || 'http://172.25.128.20:11434/api';
+export const DEFAULT_EMBEDDING_MODEL = 'all-minilm:l6-v2';
+export const DEFAULT_EMBEDDING_DIMENSIONS = 384;
 
 const ollama = createOllama({
   baseURL: ollamaBaseUrl,
@@ -30,8 +32,12 @@ export function getLanguageModel(): LanguageModel {
       if (!Number.isSafeInteger(numCtx) || numCtx < 1) {
         throw new Error('OLLAMA_NUM_CTX must be a positive integer.');
       }
+      const temperature = Number.parseFloat(process.env.OLLAMA_TEMPERATURE || '0');
+      if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
+        throw new Error('OLLAMA_TEMPERATURE must be a number between 0 and 2.');
+      }
       return ollama.chat(modelName || 'qwen2.5:14b', {
-        options: { num_ctx: numCtx },
+        options: { num_ctx: numCtx, temperature },
       });
     }
     case 'openai': {
@@ -46,7 +52,10 @@ export function getLanguageModel(): LanguageModel {
 
 // ─── Embedding Model (for Phase 5 RAG) ─────────────────────────
 export function getEmbeddingModel(): EmbeddingModel {
-  return ollama.textEmbeddingModel('bge-m3');
+  return ollama.textEmbeddingModel(
+    DEFAULT_EMBEDDING_MODEL,
+    { truncate: false },
+  );
 }
 
 // ─── Health Check ───────────────────────────────────────────────

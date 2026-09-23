@@ -236,6 +236,8 @@ Tool wrapper around the calendar integration — lets the LLM check upcoming eve
 
 ### Phase 4: Email Integration (IMAP Pull)
 
+**Current project scope:** Email integration is deferred. Core phases 5, 6, and 8 are implemented; keep email and calendar integrations plus Phase 9 security/deployment out of scope until resumed.
+
 #### [NEW] `src/integrations/email.ts`
 Email ingestion pipeline:
 1. **Connect** to Gmail via IMAP (`imapflow` package) using App Password
@@ -269,69 +271,54 @@ SQLite database with two extensions:
 Embedding generation using Ollama's embedding endpoint on lab52:
 ```typescript
 // POST http://172.25.128.20:11434/api/embed
-// model: "nomic-embed-text" or "all-minilm"
+// model: "all-minilm:l6-v2" (384 dimensions)
 // input: chunk text
 ```
 
 #### [NEW] `src/memory/search.ts`
 Hybrid search pipeline:
-1. **Chunk** vault markdown files (~400 tokens, 50-token overlap)
-2. **Embed** chunks via Ollama on lab52
-3. **Index** into SQLite (sqlite-vec for vectors, FTS5 for keywords)
-4. **Query:** 0.7 × vector similarity + 0.3 × keyword BM25 score
-5. **Incremental:** Only re-index files modified since last indexing run
+1. **Chunk** vault Markdown into approximately 400-token pieces with a 50-token overlap (implemented as a 1,600-character target and 200-character overlap, with paragraph/word boundaries; Ollama truncation is disabled, and any chunk the model rejects for context length is subdivided and retried).
+2. **Build a compact file profile** from path, title, description, tags, and headings; embed profiles in batches for a cheap catalog-level route.
+3. **Index** file profiles and note chunks in SQLite (`sqlite-vec`) with exact text in FTS5.
+4. **Retrieve in parallel:** file-profile similarity, title/path/metadata matches, chunk semantic similarity, and chunk BM25. Fuse rankings with reciprocal rank fusion instead of directly adding cosine and BM25 values, whose scales are not comparable.
+5. **Keep a global detail path:** the file profile ranks likely notes but never filters chunk search. This preserves recall for identifiers and facts omitted from summaries. Return up to three supporting passages; the search tool also supplies up to three full notes below a size limit.
+6. **Incremental:** SHA-256 content hashes ensure only added/changed files are embedded; deleted files are removed; missing profile/vector/FTS rows trigger repair.
+7. **Catalog:** Maintain a marked block in `vault/index.md` with each filename, description, and vault-relative path; preserve human-edited sections. A dedicated `vaultCatalog` tool reads the complete inventory for broad list questions.
 
-The `vault-search` tool in Phase 3 upgrades to use this hybrid pipeline once it's built.
+The application loads the complete catalog for broad inventory prompts and performs a bounded pre-search for other substantive vault questions before calling the model. Profile questions use the already loaded `USER.md` context and skip redundant search. Search evidence is supplied to the model so Qwen can answer directly; tools remain available for follow-up reads without a required `toolChoice` that can reject a valid direct answer. The Phase 3 `vault-search` tool uses this hybrid pipeline.
 
 ---
 
 ### Phase 6: Heartbeat — The Proactive Loop
 
-The core differentiator from a chatbot. A cron job that wakes the agent every 30 minutes.
+The core proactive loop is vault-only until email and calendar integrations are resumed. It runs every 30 minutes from 08:00 through 22:30 in the configured timezone (`Asia/Kolkata` by default), compiles local Inbox Markdown, and records a daily log. Run it once with `npm run heartbeat -- --once`; use `npm run ingest` to compile without starting the scheduler.
 
 #### [NEW] `src/heartbeat/cron.ts`
 ```typescript
 import cron from 'node-cron';
+import { runHeartbeat } from './heartbeat-agent.js';
 
-// Every 30 minutes during active hours (8am-10pm IST)
-cron.schedule('*/30 8-22 * * *', async () => {
-  // 1. Pre-fetch data from integrations
-  const newEmails = await emailIntegration.fetchNew();
-  const upcomingMeetings = await calendarIntegration.getNext24Hours();
-  
-  // 2. If nothing new, write HEARTBEAT_OK to daily log and exit
-  if (!newEmails.length && !upcomingMeetings.length) {
-    await appendToDaily('HEARTBEAT_OK - no updates');
-    return;
-  }
-  
-  // 3. Run the heartbeat agent
-  await heartbeatAgent.run({ newEmails, upcomingMeetings });
-});
+cron.schedule('*/30 8-22 * * *', () => runHeartbeat(), { timezone: 'Asia/Kolkata' });
 ```
 
 #### [NEW] `src/heartbeat/heartbeat-agent.ts`
-A specialized agent invocation that:
-1. Loads HEARTBEAT.md checklist into the system prompt
-2. Receives pre-fetched email/calendar data as context
-3. Uses tools to search the vault for related context (e.g., person profiles, project specs)
-4. Writes updates to the appropriate vault locations:
-   - New facts → `MEMORY.md` or relevant `Knowledgebase/` page
-   - Meeting prep → `Work/meetings/prep_YYYY-MM-DD_title.md`
-   - People updates → `Personal_context/people/name.md`
-5. Appends a summary to `daily/YYYY-MM-DD.md`
+A vault-only heartbeat runner that:
+1. Invokes the Inbox compiler and reports created, updated, already-known, review, and failed items.
+2. Uses the local Ollama model to produce a structured compile plan. The deterministic runner validates destinations against retrieved candidates and allowed categories.
+3. Appends run details to `daily/YYYY-MM-DD.md` and a concise line to `log.md`.
+4. Prevents duplicate processing with stable source hashes in Inbox frontmatter and exact provenance markers in compiled notes. Updates append new sections rather than replacing existing wiki text.
+5. Parks ambiguous, oversized, or invalid plans for review instead of guessing. `--retry-review` reruns these items.
 
 #### [NEW] `src/heartbeat/ingest.ts`
 The "compiler" — Karpathy's core innovation:
-1. Scans `Inbox/` for files with `processed: false` frontmatter
-2. For each unprocessed file:
-   - Reads the raw content
-   - Searches existing wiki pages for related topics
-   - Either **updates** existing pages with new information, or **creates** new entity/concept pages
-   - Adds `[[wikilinks]]` cross-references
-   - Sets `processed: true` in the inbox file's frontmatter
-3. Updates `index.md` with any new pages created
-4. Appends operations to `log.md`
+1. Scans Markdown under `Inbox/`, skipping hidden files and symlinks.
+2. Searches only compiled `Knowledgebase/`, `Work/`, and `Personal_context/` notes for candidates; raw Inbox files cannot route themselves.
+3. Samples terms across the whole source, then asks Qwen in one schema-validated call to split it into up to eight topic actions: additive update, new page in an allowed folder, already-known, or needs-review.
+4. Applies an Inbox file only if every topic has a clear destination. One ambiguous topic parks the whole source, preventing partial or guessed writes.
+5. Preserves existing note text, adds dated updates and `[[Inbox/...]]` source links, or creates new notes with per-action provenance.
+6. Saves the validated plan before writing. On restart, source markers and the saved plan resume unfinished writes without duplicating completed actions.
+7. Exposes failed and ambiguous sources in the CLI `/review` queue. A user can add a destination hint and retry only the selected source.
+8. Marks a source processed only after all planned actions finish; refreshes the catalog and search index after processing.
 
 ---
 
@@ -405,7 +392,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 
 # Pull recommended models
 ollama pull qwen2.5:14b        # Best tool-calling for its size
-ollama pull nomic-embed-text    # For embeddings
+ollama pull all-minilm:l6-v2    # 384-dimensional embeddings for Phase 5
 
 # Configure Ollama to listen on all interfaces (not just localhost)
 # Edit /etc/systemd/system/ollama.service → OLLAMA_HOST=0.0.0.0
@@ -455,17 +442,17 @@ ollama pull nomic-embed-text    # For embeddings
 | **1** | Vault structure + SOUL/USER/HEARTBEAT/BOOTSTRAP templates | 1-2 hours | None |
 | **2** | Provider registry + core agent loop with 2 tools (read/write) | 2-3 hours | Phase 1, lab52 Ollama running |
 | **3** | Full tool definitions (vault-read, vault-write, vault-search) | 1-2 hours | Phase 2 |
-| **4** | Email IMAP integration + inbox ingestion | 2-3 hours | Phase 1 |
+| **4** | Email IMAP integration + inbox ingestion (deferred) | 2-3 hours | Phase 1 |
 | **5** | Hybrid RAG (SQLite + embeddings + search) | 3-4 hours | Phase 2, lab52 embedding model |
-| **6** | Heartbeat cron loop + proactive agent + wiki compiler | 3-4 hours | Phases 3, 4, 5 |
+| **6** | Local heartbeat + Inbox-to-Wiki compiler | 3-4 hours | Phases 3, 5 |
 | **7** | Calendar integration (.ics or OAuth) | 1-2 hours | Phase 6 |
 | **8** | Interactive CLI chat interface | 2-3 hours | Phase 2 |
 | **9** | Security, state tracking, deployment hardening | 2-3 hours | All above |
 
 **Total estimated: ~3-4 day weekend sprint** for a working prototype.
 
-Recommended build sequence: **1 → 2 → 3 → 8 → 4 → 5 → 6 → 7 → 9**
-(Get the CLI chatbot working first with basic vault read/write, then layer in email + search + proactive features)
+Recommended build sequence: **1 → 2 → 3 → 8 → 5 → 6 → 7 → 9**
+(Phase 6's local compiler does not depend on email or calendar integrations. Phases 4 and 7 can populate Inbox later; Phase 9 security and deployment work also remains deferred.)
 
 ---
 
@@ -477,21 +464,26 @@ Recommended build sequence: **1 → 2 → 3 → 8 → 4 → 5 → 6 → 7 → 9*
 python3 remote_exec.py "ollama run qwen2.5:14b 'Say hello in JSON format'"
 
 # Phase 2: Verify Vercel SDK + Ollama tool calling
-npx tsx src/test-tool-call.ts  # Simple script that calls generateText with 1 tool
+npm run test:agent             # Live Qwen search/read/list/write tool loop
 
 # Phase 5: Verify hybrid search
-npx tsx src/test-search.ts     # Index 3 test files, query, verify results
+npm run test:embeddings        # Verify Ollama MiniLM returns 384-dim vectors
+npm run test:memory            # Index a temporary vault and query semantic/exact terms
+npm run test:agent             # Live Qwen tool loop against a temporary vault
+npm run index:vault            # Explicitly index the configured vault
 
-# Phase 6: Verify heartbeat loop
-npx tsx src/heartbeat/cron.ts  # Run once manually, check daily log output
+# Phase 6: Verify local compiler and heartbeat
+npm test                       # Includes Inbox compiler, recovery, review, and daily-log tests
+npm run test:ingest            # Live Qwen compile in a disposable vault
+npm run heartbeat -- --once    # Run one heartbeat against the configured vault
 ```
 
 ### Manual Verification
 1. **Phase 1:** Open vault in any editor/Obsidian, verify folder structure and template content
-2. **Phase 3:** Ask the CLI agent "What's in my vault?" → should use `vault-read` tool
-3. **Phase 4:** Trigger email fetch → verify `.md` files appear in `Inbox/emails/`
-4. **Phase 6:** Let heartbeat run for 1 hour → verify `daily/` log and any auto-generated prep docs
-5. **Phase 8:** Have a multi-turn conversation → close and reopen → verify history persists
+2. **Phase 3/5:** Ask the CLI agent "What projects are in my vault?" → should read the complete catalog; ask about a buried exact detail → search should find its source note.
+3. **Phase 6:** Drop a Markdown note in `Inbox/notes/`, run `npm run ingest`, then verify the source's processed metadata, linked destination note, and daily heartbeat log.
+4. **Phase 8:** Have a multi-turn conversation → close and reopen → verify history persists.
+5. **Deferred:** Email, calendar integrations, security, and deployment hardening remain out of the current scope.
 
 
 answers given by me

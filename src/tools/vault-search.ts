@@ -1,35 +1,56 @@
-/**
- * vault-search.ts — Search vault files by keyword (grep-style)
- * Phase 3 basic version. Upgrades to hybrid vector+keyword in Phase 5.
- */
+/** Search exact words and semantically related passages in the indexed vault. */
 
 import { tool, type Tool } from 'ai';
 import { z } from 'zod';
-import { searchVaultFiles, toolError } from './vault-fs.js';
+import { searchVault, type HybridSearchResult } from '../memory/search.js';
+import { readVaultFileIfSmall } from './vault-fs.js';
 
 type VaultSearchInput = { query: string; maxResults: number };
-type VaultSearchOutput =
-  | { success: true; query: string; totalMatches: number; truncated: boolean; results: Array<{ file: string; matches: string[] }> }
-  | { success: false; error: string };
+export type VaultSearchOutput = HybridSearchResult | { success: false; error: string };
+export type VaultSearchService = (query: string, maxResults: number) => Promise<HybridSearchResult>;
 
-export const vaultSearch: Tool<VaultSearchInput, VaultSearchOutput> = tool({
-  description: 'Search all vault markdown files for a keyword or phrase. Returns matching file paths and snippets containing the search term.',
-  inputSchema: z.object({
-    query: z.string().trim().min(1).max(200).describe('The keyword or phrase to search for (case-insensitive)'),
-    maxResults: z.number().int().min(1).max(50).default(10).describe('Maximum number of matching files to return'),
-  }),
-  execute: async ({ query, maxResults }) => {
+async function addSmallCandidateText(result: HybridSearchResult): Promise<HybridSearchResult> {
+  let remainingChars = 12_000;
+  for (const candidate of result.results.slice(0, 3)) {
     try {
-      const { totalMatches, results } = await searchVaultFiles(query, maxResults);
-      return {
-        success: true,
-        query,
-        totalMatches,
-        truncated: totalMatches > results.length,
-        results,
-      };
-    } catch (error) {
-      return { success: false, error: toolError('Search', query, error) };
+      const content = await readVaultFileIfSmall(candidate.path, Math.min(5_000, remainingChars));
+      if (content !== undefined) {
+        candidate.documentContent = content;
+        candidate.contentMode = 'full-document';
+        remainingChars -= content.length;
+      } else {
+        candidate.contentMode = 'matching-passages';
+      }
+    } catch {
+      candidate.contentMode = 'matching-passages';
     }
-  },
-});
+  }
+  return result;
+}
+
+export async function runVaultSearch(query: string, maxResults = 10): Promise<VaultSearchOutput> {
+  try {
+    return await addSmallCandidateText(await searchVault(query, maxResults));
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : 'Vault search failed.' };
+  }
+}
+
+export function createVaultSearchTool(search: VaultSearchService = searchVault): Tool<VaultSearchInput, VaultSearchOutput> {
+  return tool({
+    description: 'Search the file catalog and all note chunks using exact keyword matching and semantic similarity. The search incrementally indexes changed Markdown files, returns matching passages, and includes the full text of up to three small candidate notes. For large notes, use the returned passages or read a result by copying its case-sensitive path unchanged into vaultRead.filePath.',
+    inputSchema: z.object({
+      query: z.string().trim().min(1).max(200).describe('A question or topic to find in the vault; exact names and paraphrases are both supported.'),
+      maxResults: z.number().int().min(1).max(50).default(10).describe('Maximum number of matching files to return'),
+    }),
+    execute: async ({ query, maxResults }) => {
+      try {
+        return await addSmallCandidateText(await search(query, maxResults));
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : 'Vault search failed.' };
+      }
+    },
+  });
+}
+
+export const vaultSearch = createVaultSearchTool();

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { agentGenerate } from './agent.js';
+import { agentGenerate, agentStream } from './agent.js';
 
 function toolNames(messages: unknown[]): string[] {
   const names: string[] = [];
@@ -42,35 +42,54 @@ function toolInputs(messages: unknown[], toolName: string): Array<Record<string,
 }
 
 const previousVaultPath = process.env.VAULT_PATH;
-const tempVault = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-brain-agent-smoke-'));
+const previousMemoryDb = process.env.BRAIN_MEMORY_DB;
+const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-brain-agent-smoke-'));
+const tempVault = path.join(tempRoot, 'vault');
 const marker = `phase3-smoke-${randomUUID()}`;
 const answerToken = `ANSWER-${randomUUID()}`;
 
 try {
   process.env.VAULT_PATH = tempVault;
+  process.env.BRAIN_MEMORY_DB = path.join(tempRoot, 'state', 'memory.sqlite');
+  await fs.mkdir(tempVault, { recursive: true });
   await fs.mkdir(path.join(tempVault, 'Knowledgebase', 'concepts'), { recursive: true });
   await fs.writeFile(path.join(tempVault, 'SOUL.md'), 'Use the available vault tools carefully.\n');
-  await fs.writeFile(path.join(tempVault, 'USER.md'), 'This is a synthetic smoke test.\n');
+  await fs.writeFile(path.join(tempVault, 'USER.md'), 'This is a synthetic smoke test. The user name is Casey Example.\n');
   await fs.writeFile(path.join(tempVault, 'MEMORY.md'), 'No personal data is present in this test vault.\n');
   await fs.writeFile(path.join(tempVault, 'Knowledgebase', 'concepts', 'smoke.md'), `marker: ${marker}\nanswer: ${answerToken}\n`);
 
   const searchRead = await agentGenerate(
-    `Find the exact marker ${marker} with vaultSearch, then read the returned file with vaultRead. Do not write any files. Reply with only the answer token from that file.`,
+    `Find the exact marker ${marker} with vaultSearch and reply with only the answer token from the returned note. Small notes include their full text in the search result, so do not read unrelated files. Do not write any files.`,
     [],
     { maxSteps: 5 },
   );
   const searchReadNames = toolNames(searchRead.messages);
+  if (!searchReadNames.includes('vaultSearch')) {
+    console.error('Search/read tool-call trace:', JSON.stringify({ text: searchRead.text, messages: searchRead.messages }, null, 2));
+  }
   assert.ok(searchReadNames.includes('vaultSearch'), 'agent should invoke vaultSearch');
-  assert.ok(searchReadNames.includes('vaultRead'), 'agent should invoke vaultRead after search');
+  const searchedCorrectNote = JSON.stringify(searchRead.messages).includes('Knowledgebase/concepts/smoke.md') &&
+    JSON.stringify(searchRead.messages).includes(answerToken);
   assert.ok(
-    toolInputs(searchRead.messages, 'vaultRead').some((input) => input.filePath === 'Knowledgebase/concepts/smoke.md'),
-    'agent should read the exact path returned by vaultSearch',
+    searchedCorrectNote || toolInputs(searchRead.messages, 'vaultRead').some((input) => input.filePath === 'Knowledgebase/concepts/smoke.md'),
+    'agent should receive the full small note from search or read the exact returned path',
   );
   if (!searchRead.text.includes(answerToken)) {
     console.error('Synthetic agent response:', JSON.stringify({ text: searchRead.text, messages: searchRead.messages }));
   }
   assert.ok(searchRead.text.includes(answerToken), 'agent answer should be grounded in the synthetic note');
-  console.log('Live agent search → read: passed');
+  console.log('Live agent search grounding: passed');
+
+  const profileQuestion = await agentGenerate('What do you know about me?', [], { maxSteps: 3 });
+  assert.match(profileQuestion.text, /Casey Example/i, 'profile questions should use the already-loaded USER.md context');
+  assert.ok(!toolNames(profileQuestion.messages).includes('vaultSearch'), 'known profile context should not force a redundant search');
+  console.log('Live agent loaded-profile answer: passed');
+
+  const streamProfile = await agentStream('What do you know about me?', [], { maxSteps: 3 });
+  let streamedProfile = '';
+  for await (const token of streamProfile.textStream) streamedProfile += token;
+  assert.match(streamedProfile, /Casey Example/i, `streaming profile answer should use loaded context; received: ${streamedProfile}`);
+  console.log('Live streaming profile answer: passed');
 
   const listing = await agentGenerate(
     'Use vaultList to list the Knowledgebase/concepts directory. Reply with the name of the markdown file it contains. Do not write any files.',
@@ -98,5 +117,7 @@ try {
 } finally {
   if (previousVaultPath === undefined) delete process.env.VAULT_PATH;
   else process.env.VAULT_PATH = previousVaultPath;
-  await fs.rm(tempVault, { recursive: true, force: true });
+  if (previousMemoryDb === undefined) delete process.env.BRAIN_MEMORY_DB;
+  else process.env.BRAIN_MEMORY_DB = previousMemoryDb;
+  await fs.rm(tempRoot, { recursive: true, force: true });
 }

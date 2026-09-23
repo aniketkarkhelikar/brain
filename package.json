@@ -6,7 +6,11 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "tsx src/index.ts",
-    "test": "tsx --test src/tools/vault-tools.test.ts src/memory/session.test.ts src/memory/bootstrap.test.ts src/cli.test.ts",
+    "test": "tsx --test src/tools/vault-tools.test.ts src/memory/session.test.ts src/memory/bootstrap.test.ts src/memory/search.test.ts src/heartbeat/ingest.test.ts src/cli.test.ts",
+    "index:vault": "tsx src/memory/index-vault.ts",
+    "test:embeddings": "tsx src/test-embeddings.ts",
+    "test:memory": "tsx src/test-memory-search.ts",
+    "test:ingest": "tsx src/test-ingest.ts",
     "heartbeat": "tsx src/heartbeat/cron.ts",
     "test:connection": "tsx src/test-connection.ts",
     "test:agent": "tsx src/test-agent.ts",
@@ -14,25 +18,26 @@
     "ingest": "tsx src/heartbeat/ingest.ts"
   },
   "dependencies": {
-    "ai": "^7.0.0",
-    "ollama-ai-provider-v2": "^4.0.0",
     "@ai-sdk/openai": "^2.0.0",
-    "zod": "^4.0.16",
-    "node-cron": "^3.0.3",
-    "imapflow": "^1.0.171",
-    "html-to-text": "^9.0.5",
-    "node-ical": "^0.18.0",
+    "ai": "^7.0.0",
     "better-sqlite3": "^11.7.0",
-    "gray-matter": "^4.0.3",
+    "chalk": "^5.4.1",
     "dotenv": "^16.4.7",
     "glob": "^11.0.0",
-    "chalk": "^5.4.1"
+    "gray-matter": "^4.0.3",
+    "html-to-text": "^9.0.5",
+    "imapflow": "^1.0.171",
+    "node-cron": "^3.0.3",
+    "node-ical": "^0.18.0",
+    "ollama-ai-provider-v2": "^4.0.0",
+    "sqlite-vec": "0.1.8",
+    "zod": "^4.0.16"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "tsx": "^4.19.0",
-    "@types/node": "^22.10.0",
     "@types/better-sqlite3": "^7.6.12",
-    "@types/node-cron": "^3.0.11"
+    "@types/node": "^22.10.0",
+    "@types/node-cron": "^3.0.11",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
   }
 }
