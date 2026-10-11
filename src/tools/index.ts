@@ -14,4 +14,6 @@ export { vaultMeta } from './vault-meta.js';
 export { webSearch } from './web-search.js';
 export { webRead } from './web-read.js';
 export { skillLoad } from './skill-load.js';
+export { scratchpadRead } from './scratchpad-read.js';
+
 

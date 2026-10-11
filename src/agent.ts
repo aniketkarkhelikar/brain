@@ -20,11 +20,15 @@ import {
   webSearch,
   webRead,
   skillLoad,
+  scratchpadRead,
 } from './tools/index.js';
+
 import { runVaultSearch } from './tools/vault-search.js';
 import { readVaultCatalog } from './tools/vault-catalog.js';
 import { discoverSkills, formatSkillsPrompt } from './skills/loader.js';
+import { pruneStepMessages } from './reasoning/context-pruner.js';
 import fs from 'fs/promises';
+
 
 import path from 'path';
 import dotenv from 'dotenv';
@@ -120,6 +124,7 @@ const allTools: ToolSet = {
   webSearch,
   webRead,
   skillLoad,
+  scratchpadRead,
 };
 
 // ─── Generate response (non-streaming, for heartbeat/background) ─
@@ -146,10 +151,14 @@ export async function agentGenerate(
     messages,
     tools: allTools,
     stopWhen: isStepCount(options?.maxSteps ?? 15),
+    prepareStep: async ({ messages: stepMessages }) => {
+      const pruned = await pruneStepMessages(stepMessages);
+      return { messages: pruned };
+    },
     onStepFinish: ({ toolCalls, toolResults }) => {
       if (toolCalls && toolCalls.length > 0) {
         for (const tc of toolCalls) {
-          console.log(`  🔧 ${tc.toolName}(${JSON.stringify(tc.input).slice(0, 80)}...)`);
+          console.log(`  [tool] ${tc.toolName}(${JSON.stringify(tc.input).slice(0, 80)}...)`);
         }
       }
     },
@@ -187,11 +196,15 @@ export async function agentStream(
     messages,
     tools: allTools,
     stopWhen: isStepCount(options?.maxSteps ?? 15),
+    prepareStep: async ({ messages: stepMessages }) => {
+      const pruned = await pruneStepMessages(stepMessages);
+      return { messages: pruned };
+    },
     onStepFinish: ({ toolCalls }) => {
       if (toolCalls && toolCalls.length > 0) {
         for (const tc of toolCalls) {
           if (options?.onToolActivity) options.onToolActivity(tc.toolName, tc.input);
-          else process.stdout.write(`\n  🔧 ${tc.toolName}(${JSON.stringify(tc.input).slice(0, 80)})\n`);
+          else process.stdout.write(`\n  [tool] ${tc.toolName}(${JSON.stringify(tc.input).slice(0, 80)})\n`);
         }
       }
     },
@@ -199,6 +212,7 @@ export async function agentStream(
 
   return result;
 }
+
 
 
 export { loadVaultContext, allTools };

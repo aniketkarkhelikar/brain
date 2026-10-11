@@ -12,8 +12,8 @@ async function main(): Promise<void> {
   const readline = createInterface({ input: stdin, output: stdout, terminal: true });
   const model = process.env.ACTIVE_MODEL || 'ollama:qwen2.5:14b';
 
-  stdout.write(`🧠 Second Brain Agent v1.0 (model: ${model})\n`);
-  stdout.write(`Vault: ${vaultPath}\nLoading chat history... ✓\n`);
+  stdout.write(`Second Brain Agent v1.0 (model: ${model})\n`);
+  stdout.write(`Vault: ${vaultPath}\nLoading chat history... done.\n`);
   try {
     await runCli({
       vaultPath,

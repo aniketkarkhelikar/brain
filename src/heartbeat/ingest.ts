@@ -16,7 +16,9 @@ const MAX_SOURCE_CHARS = 16_000;
 const MAX_CANDIDATE_CHARS = 7_000;
 const MAX_CANDIDATES = 4;
 
-const ALLOWED_CATEGORIES = [
+const RESERVED_VAULT_DIRS = new Set(['inbox', 'archive', 'daily', 'state', 'logs']);
+
+export const DEFAULT_CATEGORIES = [
   'Knowledgebase/concepts',
   'Knowledgebase/entities',
   'Knowledgebase/comparisons',
@@ -25,7 +27,54 @@ const ALLOWED_CATEGORIES = [
   'Personal_context/people',
   'Personal_context/journal',
 ] as const;
-const categorySchema = z.enum(ALLOWED_CATEGORIES);
+
+export const DEFAULT_PREFIXES = ['Knowledgebase', 'Work', 'Personal_context'] as const;
+
+/**
+ * Dynamically discover valid knowledge categories in the vault folder structure.
+ * Includes defaults plus any existing non-reserved subdirectories.
+ */
+export async function getDiscoverableCategories(root: string): Promise<Set<string>> {
+  const categories = new Set<string>(DEFAULT_CATEGORIES);
+  try {
+    const entries = await fs.readdir(root, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      if (RESERVED_VAULT_DIRS.has(entry.name.toLowerCase())) continue;
+
+      const subPath = path.join(root, entry.name);
+      try {
+        const subEntries = await fs.readdir(subPath, { withFileTypes: true });
+        let hasSubdirs = false;
+        for (const sub of subEntries) {
+          if (sub.isDirectory() && !sub.name.startsWith('.')) {
+            categories.add(`${entry.name}/${sub.name}`);
+            hasSubdirs = true;
+          }
+        }
+        if (!hasSubdirs) {
+          categories.add(entry.name);
+        }
+      } catch {
+        categories.add(entry.name);
+      }
+    }
+  } catch {
+    // Return default categories on error
+  }
+  return categories;
+}
+
+export function isCategoryAllowed(category: string, availableCategories: Set<string>): boolean {
+  if (availableCategories.has(category)) return true;
+  // Ensure path is safe relative path without traversal
+  if (category.startsWith('/') || category.includes('..') || category.includes('\\')) return false;
+  const parts = category.split('/');
+  if (parts.length === 0 || RESERVED_VAULT_DIRS.has(parts[0].toLowerCase())) return false;
+  return true;
+}
+
+const categorySchema = z.string().trim().min(1);
 
 const compilePlanSchema = z.object({
   decision: z.enum(['create', 'update', 'already_known', 'needs_review']),
@@ -265,7 +314,11 @@ async function removeJournal(options: IngestOptions, hash: string, sourcePath: s
 }
 
 function eligibleCompiledPath(filePath: string): boolean {
-  return /^(Knowledgebase|Work|Personal_context)\/.+\.md$/i.test(filePath);
+  if (!filePath.endsWith('.md')) return false;
+  const parts = filePath.split('/');
+  if (parts.length < 2) return false;
+  const top = parts[0].toLowerCase();
+  return !RESERVED_VAULT_DIRS.has(top) && !parts.some((p) => p.startsWith('.'));
 }
 
 function slugify(value: string): string {
@@ -393,6 +446,18 @@ async function collectCandidates(
     ? units
     : Array.from({ length: sampleCount }, (_, index) => units[Math.round(index * (units.length - 1) / Math.max(1, sampleCount - 1))]);
   const query = [title, tags, ...samples].filter(Boolean).join('\n').slice(0, 1_800) || path.basename(sourcePath, '.md');
+  const prefixes = new Set<string>(DEFAULT_PREFIXES);
+  try {
+    const topEntries = await fs.readdir(root, { withFileTypes: true });
+    for (const e of topEntries) {
+      if (e.isDirectory() && !e.name.startsWith('.') && !RESERVED_VAULT_DIRS.has(e.name.toLowerCase())) {
+        prefixes.add(e.name);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
   const search = options.search || searchVault;
   const result = await search(query, 12, {
     vaultPath: root,
@@ -400,7 +465,7 @@ async function collectCandidates(
     model: options.model,
     embeddingDimensions: options.embeddingDimensions,
     embedMany: options.embedMany,
-    includePrefixes: ['Knowledgebase', 'Work', 'Personal_context'],
+    includePrefixes: Array.from(prefixes),
   });
 
   const candidates: Array<{ path: string; title: string; description: string; content: string; editable: boolean }> = [];
@@ -497,6 +562,7 @@ async function processItem(
       return { source: sourcePath, decision: 'needs_review', message: reason || 'At least one topic could not be safely routed.' };
     }
 
+    const availableCategories = await getDiscoverableCategories(root);
     const createTargets = new Set<string>();
     for (const item of items) {
       if (item.decision === 'update' || item.decision === 'already_known') {
@@ -512,7 +578,7 @@ async function processItem(
           return { source: sourcePath, decision: 'needs_review', message: reason };
         }
       } else if (item.decision === 'create') {
-        if (!item.category || !ALLOWED_CATEGORIES.includes(item.category) || item.targetPath !== null || !item.body.trim()) {
+        if (!item.category || !isCategoryAllowed(item.category, availableCategories) || item.targetPath !== null || !item.body.trim()) {
           const reason = 'The compiler returned an incomplete new-note plan; the source was parked without changes.';
           await markInbox(root, sourcePath, raw, { processed: false, ingestion_status: 'needs_review', ingestion_note: reason, attempted_hash: hash });
           return { source: sourcePath, decision: 'needs_review', message: reason };

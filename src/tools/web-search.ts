@@ -16,8 +16,9 @@ export type WebSearchResultItem = {
 };
 
 const webSearchSchema = z.object({
-  query: z.string().min(1).max(300).describe('Search query, e.g. "Tata Harrier buying checklist 2026" or "zero depreciation car insurance"'),
-  useLocation: z.boolean().default(true).describe('Whether to automatically bias results with the user local geographical context (e.g. country/city)'),
+  query: z.string().min(1).max(300).describe('Search query to look up on the live web'),
+  locationBias: z.string().optional().describe('Optional explicit geographical location to scope the query (e.g. city, state, or country)'),
+  useLocation: z.boolean().default(false).describe('Whether to automatically bias results with the user local geographical context'),
   maxResults: z.number().int().min(1).max(10).default(5).describe('Maximum number of search results to return (default 5)'),
 });
 
@@ -131,33 +132,36 @@ export async function performDdgSearch(
   return results;
 }
 
-
 export const webSearch: Tool<WebSearchInput, WebSearchOutput> = tool({
   description: 'Search the live web using free DuckDuckGo search. Automatically incorporates user location when appropriate. Results are returned into conversation memory for synthesis only and are NEVER written to the vault.',
   inputSchema: webSearchSchema,
-  execute: async ({ query, useLocation = true, maxResults = 5 }) => {
+  execute: async ({ query, locationBias, useLocation = false, maxResults = 5 }) => {
     try {
       let finalQuery = query.trim();
       let locationUsed: string | undefined;
 
-      if (useLocation) {
+      if (locationBias && locationBias.trim()) {
+        const bias = locationBias.trim();
+        if (!finalQuery.toLowerCase().includes(bias.toLowerCase())) {
+          finalQuery = `${finalQuery} ${bias}`;
+          locationUsed = bias;
+        }
+      } else if (useLocation) {
         const loc = await getUserLocation();
         const locContext = formatLocationContext(loc);
         const queryLower = finalQuery.toLowerCase();
 
-        // Check if query could benefit from location and does not already mention country or city
-        const hasLocationMention = loc.country && queryLower.includes(loc.country.toLowerCase()) ||
+        // Check if query does not already mention country or city
+        const hasLocationMention =
+          (loc.country && queryLower.includes(loc.country.toLowerCase())) ||
           (loc.city && queryLower.includes(loc.city.toLowerCase()));
 
-        if (!hasLocationMention && loc.country) {
-          // If query is about local domains like buying cars, insurance, taxes, weather, regulations, dealers
-          const isLocallySensitive = /\b(buy|buying|car|cars|price|prices|insurance|tax|rto|registration|dealer|cost|rate|law|legal|salary|weather)\b/i.test(queryLower);
-          if (isLocallySensitive) {
-            finalQuery = `${finalQuery} ${loc.country}`;
-            locationUsed = locContext;
-          }
+        if (!hasLocationMention && loc.country && loc.country !== 'Unknown location') {
+          finalQuery = `${finalQuery} ${loc.country}`;
+          locationUsed = locContext;
         }
       }
+
 
       const results = await performDdgSearch(finalQuery, maxResults);
       return {

@@ -3,8 +3,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ingestInbox, type IngestOptions, type IngestStats } from './ingest.js';
+import { getUserLocation } from '../utils/location.js';
 
 export type HeartbeatOptions = IngestOptions & { timezone?: string };
+
 export type HeartbeatResult = { startedAt: string; finishedAt: string; ingestion: IngestStats };
 let activeHeartbeat: Promise<HeartbeatResult> | undefined;
 
@@ -63,8 +65,13 @@ async function recordHeartbeat(root: string, timestamp: Date, timezone: string, 
 
 async function performHeartbeat(options: HeartbeatOptions): Promise<HeartbeatResult> {
   const started = options.now?.() ?? new Date();
-  const timezone = options.timezone || process.env.HEARTBEAT_TIMEZONE || 'Asia/Kolkata';
+  const timezone =
+    options.timezone ||
+    process.env.HEARTBEAT_TIMEZONE ||
+    (await getUserLocation()).timezone ||
+    'UTC';
   const root = vaultRoot(options);
+
   const ingestion = await ingestInbox(options);
   const finished = options.now?.() ?? new Date();
   await recordHeartbeat(root, finished, timezone, ingestion);

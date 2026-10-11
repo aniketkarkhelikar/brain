@@ -106,8 +106,10 @@ describe('Phase 3 vault tools', () => {
         'webSearch',
         'webRead',
         'skillLoad',
+        'scratchpadRead',
       ].sort(),
     );
+
 
     const context = await loadVaultContext();
     assert.match(context, /=== SOUL\.md === \(not found\)/);

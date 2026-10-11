@@ -31,12 +31,41 @@ function locationCachePath(): string {
   return path.join(defaultStatePath(), 'location.json');
 }
 
-function timezoneFallback(): UserLocation {
-  const tz = process.env.HEARTBEAT_TIMEZONE ||
-    Intl.DateTimeFormat().resolvedOptions().timeZone ||
-    'Asia/Kolkata';
+function defaultVaultPath(): string {
+  return path.resolve(process.env.VAULT_PATH || './vault');
+}
 
-  let country = 'India';
+async function readUserContextLocation(): Promise<Partial<UserLocation> | null> {
+  try {
+    const userMdPath = path.join(defaultVaultPath(), 'USER.md');
+    const content = await fs.readFile(userMdPath, 'utf8');
+    const locationMatch = content.match(/- \*\*Location:\*\*\s*(.+)/i);
+    const timezoneMatch = content.match(/- \*\*Timezone:\*\*\s*([^\s(]+)/i);
+
+    const country = locationMatch?.[1]?.trim();
+    const timezone = timezoneMatch?.[1]?.trim();
+
+    const isPlaceholder = (val?: string) => !val || val.startsWith('(') || /^(unknown|none|tbd|to be learned)$/i.test(val);
+
+    if (!isPlaceholder(country) || !isPlaceholder(timezone)) {
+      return {
+        country: !isPlaceholder(country) ? country : undefined,
+        timezone: !isPlaceholder(timezone) ? timezone : undefined,
+      };
+    }
+  } catch {
+    // USER.md not readable
+  }
+  return null;
+}
+
+function timezoneFallback(): UserLocation {
+  const tz =
+    process.env.HEARTBEAT_TIMEZONE ||
+    Intl.DateTimeFormat().resolvedOptions().timeZone ||
+    'UTC';
+
+  let country: string | undefined;
   if (tz.startsWith('America/')) country = 'United States';
   else if (tz.startsWith('Europe/London')) country = 'United Kingdom';
   else if (tz.startsWith('Europe/')) country = 'Europe';
@@ -51,6 +80,7 @@ function timezoneFallback(): UserLocation {
     source: 'timezone',
   };
 }
+
 
 export async function getUserLocation(forceRefresh = false): Promise<UserLocation> {
   const cacheFile = locationCachePath();
@@ -107,10 +137,23 @@ export async function getUserLocation(forceRefresh = false): Promise<UserLocatio
     // Network or timeout failure
   }
 
-  return timezoneFallback();
+  const userContext = await readUserContextLocation();
+  const baseLocation = timezoneFallback();
+  if (userContext?.country || userContext?.timezone) {
+    return {
+      ...baseLocation,
+      country: userContext.country || baseLocation.country,
+      timezone: userContext.timezone || baseLocation.timezone,
+      source: 'user_context' as any,
+    };
+  }
+
+  return baseLocation;
 }
+
 
 export function formatLocationContext(loc: UserLocation): string {
   const parts = [loc.city, loc.region, loc.country].filter(Boolean);
-  return parts.length ? parts.join(', ') : 'India';
+  return parts.length ? parts.join(', ') : 'Unknown location';
 }
+
