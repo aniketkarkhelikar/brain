@@ -12,6 +12,8 @@ import { createVaultSearchTool, vaultSearch } from './vault-search.js';
 import { readVaultFileIfSmall, searchVaultFiles } from './vault-fs.js';
 import { vaultWrite } from './vault-write.js';
 import { vaultCatalog } from './vault-catalog.js';
+import { vaultPatch } from './vault-patch.js';
+import { vaultMeta } from './vault-meta.js';
 
 let tempRoot = '';
 let vaultRoot = '';
@@ -88,7 +90,7 @@ describe('Phase 3 vault tools', () => {
 
   it('registers the vault inventory route and loads the configured vault context', async () => {
     assert.deepEqual(Object.keys(allTools).sort(), [
-      'skillLoad', 'vaultCatalog', 'vaultList', 'vaultRead', 'vaultSearch', 'vaultWrite', 'webRead', 'webSearch',
+      'memoryAudit', 'skillLoad', 'vaultCatalog', 'vaultList', 'vaultMeta', 'vaultPatch', 'vaultRead', 'vaultSearch', 'vaultWrite', 'webRead', 'webSearch',
     ].sort());
     const context = await loadVaultContext();
     assert.match(context, /=== SOUL\.md === \(not found\)/);
@@ -162,6 +164,52 @@ describe('Phase 3 vault tools', () => {
       assert.equal(result.success, false, `expected ${filePath} to be denied`);
     }
     assert.equal(await fs.readFile(outsideFile, 'utf8'), 'outside secret must not be read or changed\n');
+  });
+
+  it('applies only unique exact patches and preserves the rest of a note', async () => {
+    const original = '# Launch\n\nStatus: active\nOwner: Maya\nBackup owner: Maya\n';
+    const file = path.join(vaultRoot, 'Work', 'projects', 'launch.md');
+    await fs.writeFile(file, original);
+    assert.deepEqual(await runTool(vaultPatch, {
+      filePath: 'Work/projects/launch.md', search: 'Status: active', replace: 'Status: complete',
+    }), { success: true, path: 'Work/projects/launch.md', replacements: 1 });
+    assert.equal(await fs.readFile(file, 'utf8'), original.replace('Status: active', 'Status: complete'));
+    const ambiguous = await runTool(vaultPatch, {
+      filePath: 'Work/projects/launch.md', search: 'Maya', replace: 'Rae',
+    }) as { success: boolean; error: string };
+    assert.equal(ambiguous.success, false);
+    assert.match(ambiguous.error, /appears 2 times/);
+    const explicitMultiple = await runTool(vaultPatch, {
+      filePath: 'Work/projects/launch.md', search: 'Maya', replace: 'Rae', allowMultiple: true,
+    }) as { success: boolean; replacements: number };
+    assert.equal(explicitMultiple.success, true);
+    assert.equal(explicitMultiple.replacements, 2);
+    const stale = await runTool(vaultPatch, {
+      filePath: 'Work/projects/launch.md', search: 'Status: active', replace: 'Status: closed',
+    }) as { success: boolean; error: string };
+    assert.equal(stale.success, false);
+    assert.match(stale.error, /not found/);
+    const outside = await runTool(vaultPatch, {
+      filePath: '../outside-secret.md', search: 'outside', replace: 'changed',
+    }) as { success: boolean };
+    assert.equal(outside.success, false);
+  });
+
+  it('reads and updates frontmatter while leaving note content unchanged', async () => {
+    const target = path.join(vaultRoot, 'Knowledgebase', 'concepts', 'graph.md');
+    const body = '\n# Knowledge graph\nThe structured wiki links related notes.\nGraph search is case-insensitive.\n';
+    await fs.writeFile(target, `---\ntitle: Knowledge graph\ntags: [memory]\n---${body}`);
+    const read = await runTool(vaultMeta, { filePath: 'Knowledgebase/concepts/graph.md' }) as { success: boolean; metadata: Record<string, unknown> };
+    assert.equal(read.success, true);
+    assert.equal(read.metadata.title, 'Knowledge graph');
+    const updated = await runTool(vaultMeta, {
+      filePath: 'Knowledgebase/concepts/graph.md', updates: { status: 'active', tags: ['memory', 'graph'] },
+    }) as { success: boolean; metadata: Record<string, unknown> };
+    assert.equal(updated.success, true);
+    assert.equal(updated.metadata.status, 'active');
+    assert.match(await fs.readFile(target, 'utf8'), /# Knowledge graph\nThe structured wiki links related notes/);
+    const traversal = await runTool(vaultMeta, { filePath: '../outside-secret.md' }) as { success: boolean };
+    assert.equal(traversal.success, false);
   });
 
   it('lists the root and nested folders deterministically while hiding hidden files and symlinks', async () => {

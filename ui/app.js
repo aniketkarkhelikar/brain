@@ -138,9 +138,18 @@ function renderMemoryAudit(report) {
 function switchView(view) {
   state.view = view; $$('.view').forEach((item) => item.classList.toggle('active', item.id === `view-${view}`));
   $$('.nav-item[data-view]').forEach((item) => item.classList.toggle('active', item.dataset.view === view));
-  $('#crumb-current').textContent = ({ assistant: 'Assistant', brain: 'Brain', projects: 'Projects', inbox: 'Inbox', tasks: 'Tasks', agents: 'Background agents', settings: 'Settings', email: 'Email', meetings: 'Meetings', calendar: 'Calendar', apps: 'Apps' })[view] || view;
+  $('#crumb-current').textContent = ({ assistant: 'Assistant', brain: 'Brain', projects: 'Projects', inbox: 'Inbox', tasks: 'Tasks', agents: 'Background agents', skills: 'Skills', settings: 'Settings', email: 'Email', meetings: 'Meetings', calendar: 'Calendar', apps: 'Apps' })[view] || view;
   if (view === 'brain') loadBrain(); if (view === 'inbox') loadReview();
-  if (view === 'projects') loadProjects(); if (view === 'agents') loadAgents(); if (view === 'tasks') loadTasks();
+  if (view === 'projects') loadProjects(); if (view === 'agents') loadAgents(); if (view === 'tasks') loadTasks(); if (view === 'skills') loadSkills();
+}
+async function loadSkills() {
+  const panel = $('#skills-panel'); panel.innerHTML = '<div class="empty-state">Finding available skills…</div>';
+  try {
+    const skills = await api('/api/skills');
+    $('#skill-count').textContent = String(skills.length);
+    $('#skills-summary').textContent = `${skills.length} available`;
+    panel.innerHTML = skills.length ? skills.map((skill) => `<article class="skill-card"><div class="skill-card-mark" aria-hidden="true">✳</div><div class="skill-card-copy"><h2>${esc(skill.name.replaceAll('-', ' '))}</h2><p>${esc(skill.description)}</p><small>Loaded when relevant · ${esc(skill.dirName)}</small></div></article>`).join('') : '<div class="empty-state">No skills found in the local skills folder.</div>';
+  } catch (error) { panel.innerHTML = `<div class="empty-state">${esc(error.message)}</div>`; }
 }
 function renderSources(node, sources = []) {
   let section = node.querySelector('.message-sources');
@@ -240,7 +249,7 @@ async function sendMessage(value, options = {}) {
     renderTrace(output.closest('.message'), toolTrace); renderSources(output.closest('.message'), sources);
     await refreshSessions();
   } catch (error) { output.classList.remove('thinking'); output.classList.add('error-text'); output.textContent = error.message; output.closest('.message')?.querySelector('.message-status')?.remove(); toast('Assistant needs attention', error.message, 'error'); await refreshSessions().catch(() => {}); }
-  finally { state.busy = false; $('#send').disabled = false; renderSessionList(); $('#connection-label').textContent = 'Local · Ready'; $('#prompt').focus(); }
+  finally { state.busy = false; $('#send').disabled = false; renderSessionList(); $('#connection-label').textContent = 'Brain · Ready'; $('#prompt').focus(); }
 }
 function toolStatus(name) {
   const labels = { vaultSearch: 'Searching your notes', vaultRead: 'Reading a note', vaultList: 'Checking your folders', vaultCatalog: 'Reviewing your vault index', webSearch: 'Searching public sources', webRead: 'Opening a source page', skillLoad: 'Loading a matching skill', vaultWrite: 'Updating your vault' };
@@ -250,8 +259,10 @@ async function loadOverview() {
   try {
     const info = await api('/api/overview'); state.overview = info; state.recentRuns = info.recentRuns || []; state.files = await api('/api/brain/files');
     const onboarding = await api('/api/onboarding'); if (onboarding.required && (!state.onboarding || state.onboarding.index !== onboarding.index)) showOnboarding(onboarding);
-    setText('#file-count', info.fileCount); setText('#review-count', info.reviewCount); setText('#composer-model', info.model.replace(/^ollama:/, '') + ' · Local');
-    setText('#settings-model', info.model); setText('#settings-vault', info.vaultPath);
+    setText('#file-count', info.fileCount); setText('#review-count', info.reviewCount);
+    const provider = info.model.startsWith('openai:') ? 'OpenAI' : info.model.startsWith('ollama:') ? 'Ollama · Local' : 'Configured';
+    setText('#composer-model', info.model.replace(/^(?:ollama|openai):/, '') + ' · ' + provider);
+    setText('#settings-model', info.model); setText('#settings-provider', provider); setText('#settings-vault', info.vaultPath);
     renderAudit(info.audit);
     renderMemoryAudit(info.memoryAudit);
     const lastCheckAt = [info.audit?.auditedAt, info.memoryAudit?.auditedAt].filter(Boolean).sort().at(-1);
@@ -262,7 +273,7 @@ async function loadOverview() {
     setText('#settings-watcher', info.watcherReady ? 'Watching nested Markdown changes on this device' : 'Starting local Markdown watcher…');
     if (info.lastActivity) handleActivity(info.lastActivity, false);
     if (state.view === 'agents') renderAgentStatus();
-  } catch (error) { $('#connection-label').textContent = 'Local · Offline'; toast('Could not reach your brain', error.message, 'error'); }
+  } catch (error) { $('#connection-label').textContent = 'Brain · Offline'; toast('Could not reach your brain', error.message, 'error'); }
 }
 function showOnboarding(status) {
   if (!status.required) { $('#onboarding-modal').hidden = true; return; }
@@ -292,14 +303,21 @@ function handleActivity(event, notify = true) {
   if (notify && event.type === 'error') toast(title, text, 'error');
   if (event.stats) setText('#review-count', event.stats.needsReview || 0);
 }
-function connectEvents() { const stream = new EventSource('/api/events'); const markConnected = () => { if (!state.busy) $('#connection-label').textContent = 'Local · Ready'; }; stream.onopen = markConnected; stream.addEventListener('activity', (event) => { const data = JSON.parse(event.data); handleActivity(data); loadOverview(); }); stream.addEventListener('ready', (event) => { const data = JSON.parse(event.data); markConnected(); if (data.lastActivity) handleActivity(data.lastActivity, false); }); stream.onerror = () => { $('#connection-label').textContent = 'Reconnecting…'; }; }
+function connectEvents() { const stream = new EventSource('/api/events'); const markConnected = () => { if (!state.busy) $('#connection-label').textContent = 'Brain · Ready'; }; stream.onopen = markConnected; stream.addEventListener('activity', (event) => { const data = JSON.parse(event.data); handleActivity(data); loadOverview(); }); stream.addEventListener('ready', (event) => { const data = JSON.parse(event.data); markConnected(); if (data.lastActivity) handleActivity(data.lastActivity, false); }); stream.onerror = () => { $('#connection-label').textContent = 'Reconnecting…'; }; }
 async function loadBrain() {
   const q = $('#brain-search').value.trim(); $('#brain-panel').innerHTML = '<div class="empty-state">Opening your brain…</div>';
   try {
-    const data = q ? await api(`/api/brain/search?q=${encodeURIComponent(q)}`) : await api('/api/brain/files');
+    const data = q ? await api(`/api/brain/search?q=${encodeURIComponent(q)}`) : state.brainTab === 'graph' ? await api('/api/brain/graph') : await api('/api/brain/files');
     if (q) { const rows = data.results || []; $('#brain-results-label').textContent = `${rows.length} matching notes`; $('#brain-panel').innerHTML = rows.length ? `<div class="file-grid">${rows.map((item) => `<article class="file-card" data-note="${esc(item.path)}"><div class="file-card-top"><span class="file-icon">⌕</span><div><strong>${esc(item.title || item.path)}</strong><small>${esc(item.path)}</small></div></div><p>${esc((item.matches || []).join(' · ') || item.snippet || item.description || 'Matching note')}</p></article>`).join('')}</div>` : '<div class="empty-state">No notes surfaced for that search.</div>'; bindNotes(); return; }
-    state.files = data; $('#brain-results-label').textContent = `${data.length} notes across ${new Set(data.map((x) => x.folder)).size} folders`;
-    if (state.brainTab === 'base') renderTable(data); else if (state.brainTab === 'files') renderFiles(data); else renderGraph(data);
+    if (state.brainTab === 'graph') {
+      state.files = data.nodes;
+      $('#brain-results-label').textContent = `${data.nodes.length} notes · ${data.edges.length} explicit references`;
+      renderGraph(data);
+    } else {
+      state.files = data;
+      $('#brain-results-label').textContent = `${data.length} notes across ${new Set(data.map((x) => x.folder)).size} folders`;
+      if (state.brainTab === 'base') renderTable(data); else renderFiles(data);
+    }
   } catch (error) { $('#brain-panel').innerHTML = `<div class="empty-state">${esc(error.message)}</div>`; }
 }
 async function loadProjects() {
@@ -324,15 +342,77 @@ function renderAgentStatus() {
 async function loadAgents() { await loadOverview(); renderAgentStatus(); }
 function renderFiles(files) { $('#brain-panel').innerHTML = files.length ? `<div class="file-grid">${files.map((file) => `<article class="file-card" data-note="${esc(file.path)}"><div class="file-card-top"><span class="file-icon">▤</span><div><strong>${esc(file.name)}</strong><small>${esc(file.folder)} · ${relativeDate(file.modified)}</small></div></div><p>${(file.bytes / 1024).toFixed(1)} KB · Open note</p></article>`).join('')}</div>` : '<div class="empty-state">No Markdown notes in this vault yet.</div>'; bindNotes(); }
 function renderTable(files) { $('#brain-panel').innerHTML = files.length ? `<table class="brain-table"><thead><tr><th>Name</th><th>Folder</th><th>Size</th><th>Last modified</th></tr></thead><tbody>${files.map((file) => `<tr><td data-note="${esc(file.path)}">${esc(file.name)}</td><td>${esc(file.folder)}</td><td>${(file.bytes / 1024).toFixed(1)} KB</td><td>${new Date(file.modified).toLocaleDateString()}</td></tr>`).join('')}</tbody></table>` : '<div class="empty-state">Your notes will appear here.</div>'; bindNotes(); }
-async function renderGraph(files) {
-  const sample = files.slice(0, 28); const notes = await Promise.all(sample.map(async (f) => { try { return { ...f, text: (await api(`/api/brain/note?path=${encodeURIComponent(f.path)}`)).content }; } catch { return { ...f, text: '' }; } }));
-  const centers = notes.slice(0, 16); const mid = Math.floor(centers.length / 2); const linkIndex = new Map(centers.map((n, i) => [n.name.toLowerCase(), i]));
-  const links = [];
-  for (const [i, note] of centers.entries()) for (const [, raw] of note.text.matchAll(/\[\[([^\]|#]+)(?:\|[^\]]*)?\]\]/g)) { const j = linkIndex.get(raw.trim().replace(/\.md$/i, '').split('/').pop().toLowerCase()); if (j !== undefined && j !== i && !links.some(([a,b]) => a === i && b === j || a === j && b === i)) links.push([i,j]); }
-  const positions = centers.map((_, i) => { const angle = (Math.PI * 2 * i / Math.max(centers.length, 1)) - Math.PI / 2; const radius = i === 0 ? 0 : .36 + (i % 3) * .06; return { x: i === 0 ? 50 : 50 + Math.cos(angle) * radius * 100, y: i === 0 ? 50 : 50 + Math.sin(angle) * radius * 74 }; });
-  $('#brain-panel').innerHTML = centers.length ? `<div class="graph-view"><svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">${links.map(([a,b]) => `<line x1="${positions[a].x}" y1="${positions[a].y}" x2="${positions[b].x}" y2="${positions[b].y}" stroke="#cbd5c8" stroke-width=".22"/>`).join('')}</svg>${centers.map((n,i) => `<button class="graph-node ${i === 0 ? 'central' : ''}" style="left:${positions[i].x}%;top:${positions[i].y}%" data-note="${esc(n.path)}">${esc(n.name)}</button>`).join('')}<span class="graph-caption">${links.length} explicit note links · select a note to open</span></div>` : '<div class="empty-state">No notes yet. Ingest a note to begin.</div>'; bindNotes();
+function layoutGraph(nodes, edges) {
+  const width = 1000, height = 680, count = nodes.length;
+  const positions = nodes.map((_, index) => {
+    const angle = (Math.PI * 2 * index / Math.max(count, 1)) - Math.PI / 2;
+    const radius = count <= 1 ? 0 : Math.min(255, 70 + count * 3.5);
+    return { x: width / 2 + Math.cos(angle) * radius, y: height / 2 + Math.sin(angle) * radius * .72, vx: 0, vy: 0 };
+  });
+  const indexByPath = new Map(nodes.map((node, index) => [node.path, index]));
+  const springs = edges.flatMap((edge) => {
+    const source = indexByPath.get(edge.source), target = indexByPath.get(edge.target);
+    return source === undefined || target === undefined ? [] : [{ source, target }];
+  });
+  for (let iteration = 0; iteration < 150; iteration += 1) {
+    const forces = positions.map(() => ({ x: 0, y: 0 }));
+    for (let a = 0; a < count; a += 1) for (let b = a + 1; b < count; b += 1) {
+      let dx = positions[b].x - positions[a].x, dy = positions[b].y - positions[a].y;
+      let distance = Math.hypot(dx, dy);
+      if (distance < 1) { dx = (a + 1) * .7; dy = (b + 1) * .4; distance = Math.hypot(dx, dy); }
+      const force = Math.min(3.2, 2100 / (distance * distance));
+      forces[a].x -= dx / distance * force; forces[a].y -= dy / distance * force;
+      forces[b].x += dx / distance * force; forces[b].y += dy / distance * force;
+    }
+    for (const edge of springs) {
+      const a = positions[edge.source], b = positions[edge.target];
+      const dx = b.x - a.x, dy = b.y - a.y, distance = Math.max(1, Math.hypot(dx, dy));
+      const force = (distance - 112) * .0015;
+      forces[edge.source].x += dx / distance * force; forces[edge.source].y += dy / distance * force;
+      forces[edge.target].x -= dx / distance * force; forces[edge.target].y -= dy / distance * force;
+    }
+    const cooling = 1 - iteration / 190;
+    for (const [index, position] of positions.entries()) {
+      forces[index].x += (width / 2 - position.x) * .00045;
+      forces[index].y += (height / 2 - position.y) * .00045;
+      position.vx = (position.vx + forces[index].x * 9) * .78 * cooling;
+      position.vy = (position.vy + forces[index].y * 9) * .78 * cooling;
+      position.x = Math.max(32, Math.min(width - 32, position.x + position.vx));
+      position.y = Math.max(32, Math.min(height - 32, position.y + position.vy));
+    }
+  }
+  return positions;
 }
-function bindNotes() { $$('[data-note]').forEach((el) => { if (el.dataset.noteBound) return; el.dataset.noteBound = 'true'; el.addEventListener('click', () => openNote(el.dataset.note)); }); }
+function renderGraph(graph) {
+  const { nodes, edges, unresolved } = graph;
+  if (!nodes.length) { $('#brain-panel').innerHTML = '<div class="empty-state">No Markdown notes to map yet. Add a note link such as <code>[[Project overview]]</code> to start a connected graph.</div>'; return; }
+  const positions = layoutGraph(nodes, edges);
+  const degreeRank = [...nodes].sort((a, b) => b.degree - a.degree || a.path.localeCompare(b.path));
+  const showLabels = new Set(degreeRank.slice(0, Math.min(14, nodes.length)).map((node) => node.path));
+  const indexByPath = new Map(nodes.map((node, index) => [node.path, index]));
+  const reverse = new Set(edges.map((edge) => `${edge.target}\0${edge.source}`));
+  const edgeMarkup = edges.map((edge) => {
+    const source = indexByPath.get(edge.source), target = indexByPath.get(edge.target);
+    const a = positions[source], b = positions[target];
+    let d = `M ${a.x.toFixed(1)} ${a.y.toFixed(1)} L ${b.x.toFixed(1)} ${b.y.toFixed(1)}`;
+    if (reverse.has(`${edge.source}\0${edge.target}`)) {
+      const dx = b.x - a.x, dy = b.y - a.y, distance = Math.max(1, Math.hypot(dx, dy));
+      const offset = edge.source.localeCompare(edge.target) < 0 ? 7 : -7;
+      const mx = (a.x + b.x) / 2 - dy / distance * offset, my = (a.y + b.y) / 2 + dx / distance * offset;
+      d = `M ${a.x.toFixed(1)} ${a.y.toFixed(1)} Q ${mx.toFixed(1)} ${my.toFixed(1)} ${b.x.toFixed(1)} ${b.y.toFixed(1)}`;
+    }
+    return `<path class="graph-edge ${edge.kind}" d="${d}" marker-end="url(#graph-arrow)"><title>${esc(edge.source)} references ${esc(edge.target)} (${edge.kind})</title></path>`;
+  }).join('');
+  const nodeMarkup = nodes.map((node, index) => {
+    const position = positions[index], radius = 9 + Math.min(11, Math.sqrt(node.degree) * 2.4);
+    const label = showLabels.has(node.path) ? `<text class="graph-label" text-anchor="middle" y="${(radius + 16).toFixed(1)}">${esc(node.name.length > 28 ? `${node.name.slice(0, 26)}…` : node.name)}</text>` : '';
+    return `<g class="graph-node ${node.degree > 4 ? 'well-connected' : ''}" transform="translate(${position.x.toFixed(1)} ${position.y.toFixed(1)})" data-note="${esc(node.path)}" tabindex="0" role="button" aria-label="Open ${esc(node.path)}; ${node.inDegree} incoming and ${node.outDegree} outgoing references"><title>${esc(node.path)} · ${node.inDegree} incoming · ${node.outDegree} outgoing</title><circle r="${radius.toFixed(1)}"></circle>${label}</g>`;
+  }).join('');
+  const summary = `${nodes.length} notes · ${edges.length} explicit references · ${nodes.filter((node) => !node.degree).length} unlinked`;
+  $('#brain-panel').innerHTML = `<div class="graph-view"><div class="graph-summary"><strong>${summary}</strong><span>${unresolved ? `${unresolved} unresolved or ambiguous links` : 'Every displayed edge resolves to a note'}</span></div><svg viewBox="0 0 1000 680" role="img" aria-label="Vault graph with ${nodes.length} notes and ${edges.length} explicit references"><defs><marker id="graph-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L7,3.5 L0,7 Z" fill="#a9b5aa"></path></marker></defs><g class="graph-edges">${edgeMarkup}</g><g class="graph-nodes">${nodeMarkup}</g></svg><div class="graph-caption"><span><i class="graph-legend-node"></i> Note</span><span><i class="graph-legend-link"></i> Explicit link direction</span><span>Select a note to open it</span></div></div>`;
+  bindNotes();
+}
+function bindNotes() { $$('[data-note]').forEach((el) => { if (el.dataset.noteBound) return; el.dataset.noteBound = 'true'; el.addEventListener('click', () => openNote(el.dataset.note)); el.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openNote(el.dataset.note); } }); }); }
 async function openNote(file) { try { const note = await api(`/api/brain/note?path=${encodeURIComponent(file)}`); $('#modal-title').textContent = file; $('#modal-content').innerHTML = renderNotePreview(note.content); $('#modal').hidden = false; bindNotes(); } catch (error) { toast('Could not open note', error.message, 'error'); } }
 async function loadReview() {
   try { const items = await api('/api/review'); setText('#review-count', items.length); $('#review-panel').innerHTML = items.length ? items.map((item) => `<div class="review-row"><span class="review-icon">↳</span><div class="review-copy"><strong>${esc(item.source)}</strong><p>${esc(item.message)}</p><div class="review-guidance-wrap"><input class="review-guidance" data-source="${esc(item.source)}" placeholder="Add a correction or exact destination path…"><button class="secondary-button retry-review" data-source="${esc(item.source)}">Resolve →</button></div></div><span class="review-status">${esc(item.status.replace('_',' '))}</span></div>`).join('') : '<div class="empty-state" style="margin-top:18px">Nothing needs review. The inbox is clear.</div>'; $$('.retry-review').forEach((button) => button.addEventListener('click', () => retryReview(button.dataset.source))); }

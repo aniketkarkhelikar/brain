@@ -1,11 +1,12 @@
 /**
  * providers.ts — Multi-provider model registry
  * 
- * Currently supports Ollama on lab52. Online providers are not wired yet.
- * Select the configured model with ACTIVE_MODEL, e.g. "ollama:qwen2.5:14b".
+ * Supports Ollama on lab52 and OpenAI-hosted models.
+ * Select the configured model with ACTIVE_MODEL, e.g. "ollama:qwen2.5:14b" or "openai:gpt-4.1-mini".
  */
 
 import { createOllama } from 'ollama-ai-provider-v2';
+import { createOpenAI } from '@ai-sdk/openai';
 import type { EmbeddingModel, LanguageModel } from 'ai';
 import dotenv from 'dotenv';
 
@@ -41,9 +42,10 @@ export function getLanguageModel(): LanguageModel {
       });
     }
     case 'openai': {
-      // Dynamic import would be needed for @ai-sdk/openai
-      // For now, Ollama is the primary provider
-      throw new Error(`OpenAI provider not configured yet. Set OPENAI_API_KEY in .env`);
+      const apiKey = process.env.OPENAI_API_KEY?.trim();
+      if (!apiKey) throw new Error('OpenAI requires OPENAI_API_KEY in the process environment.');
+      if (!modelName) throw new Error('Choose an OpenAI model in ACTIVE_MODEL, for example "openai:gpt-4.1-mini".');
+      return createOpenAI({ apiKey })(modelName);
     }
     default:
       throw new Error(`Unknown provider: ${provider}. Use "ollama:model" or "openai:model"`);

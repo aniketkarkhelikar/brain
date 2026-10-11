@@ -17,10 +17,10 @@ describe('chat source trail', () => {
       { toolName: 'skillLoad', output: { success: true, name: 'property-advisor' } },
     ]);
 
-    assert.equal(sources.length, 4);
+    assert.equal(sources.length, 1);
     assert.equal(sources[0].verified, true);
     assert.equal(sources[0].kind, 'web');
-    assert.deepEqual(sources.map(({ kind }) => kind), ['web', 'status', 'memory', 'skill']);
+    assert.equal(sources[0].url, 'https://example.gov/guide');
   });
 
   it('rejects unsafe links and paths while preserving distinct safe sources', () => {

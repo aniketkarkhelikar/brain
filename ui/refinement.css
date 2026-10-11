@@ -275,6 +275,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 }
 
 .settings-connectors { max-width: 920px; margin: 27px 0 0; }
+.skill-total { color: #69746c; font-size: 12px; }
+.skill-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 310px), 1fr)); gap: 14px; max-width: 1120px; margin-top: 24px; }
+.skill-card { display: flex; gap: 15px; min-height: 156px; padding: 19px; border: 1px solid var(--line); border-radius: 13px; background: #fbfcfa; box-shadow: 0 4px 18px rgb(25 35 28 / 4%); }
+.skill-card-mark { display: grid; width: 38px; height: 38px; flex: none; place-items: center; border-radius: 11px; background: var(--green-pale); color: var(--green-dark); font-size: 18px; }
+.skill-card-copy { min-width: 0; }
+.skill-card h2 { margin: 2px 0 8px; color: #28352c; font-size: 15px; font-weight: 650; text-transform: capitalize; }
+.skill-card p { margin: 0 0 13px; color: #5f6c63; font-size: 13px; line-height: 1.55; }
+.skill-card small { color: #818a83; font-size: 11px; }
 .settings-connectors .audit-section-heading { margin-bottom: 10px; }
 .connector-list { display: grid; gap: 8px; }
 .connector-list article { display: flex; min-height: 61px; align-items: center; gap: 12px; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfa; }
@@ -290,3 +298,22 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .modal-content ul, .modal-content ol { padding-left: 20px; margin: 8px 0; }
 .modal-content blockquote { margin: 9px 0; padding: 6px 12px; border-left: 2px solid #9aae9b; color: #69776a; background: #f4f7f3; }
 .note-wikilink { padding: 0; border: 0; background: none; color: #456e52; text-decoration: underline; text-underline-offset: 2px; font-size: inherit; }
+.graph-view{min-height:0;overflow:hidden;background:#fbfaf7;border:1px solid #e5e4de;border-radius:12px;box-shadow:0 8px 30px #22220a08}
+.graph-view:before,.graph-view:after{display:none}
+.graph-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 18px;border-bottom:1px solid #e9e8e2;background:#f8f7f3}
+.graph-summary strong{font-size:12px;font-weight:650;color:#4e514b}
+.graph-summary span{font-size:10px;color:#858780;text-align:right}
+.graph-view svg{position:relative;inset:auto;display:block;width:100%;height:min(68vh,620px);min-height:440px;z-index:0;background:radial-gradient(ellipse at center,#fcfcf9 0%,#f7f7f3 80%)}
+.graph-edge{fill:none;stroke:#aeb9af;stroke-width:1.25;opacity:.62;vector-effect:non-scaling-stroke}
+.graph-edge.markdown{stroke:#829785;stroke-dasharray:4 4;opacity:.68}
+.graph-node{cursor:pointer;outline:none}
+.graph-node circle{fill:#dce6dd;stroke:#718c76;stroke-width:1.5;vector-effect:non-scaling-stroke;transition:fill .16s,stroke-width .16s,filter .16s}
+.graph-node.well-connected circle{fill:#819a84;stroke:#59735e;stroke-width:2}
+.graph-node:hover circle,.graph-node:focus circle{fill:#66856b;stroke:#405f46;stroke-width:3;filter:drop-shadow(0 2px 5px #4f694355)}
+.graph-label{fill:#353c36;font:550 20px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;paint-order:stroke;stroke:#fbfaf7;stroke-width:6px;stroke-linejoin:round;pointer-events:none}
+.graph-caption{position:static;display:flex;align-items:center;gap:17px;flex-wrap:wrap;padding:11px 18px;color:#777a73;border-top:1px solid #e9e8e2;background:#f8f7f3;font-size:10px}
+.graph-caption span{display:inline-flex;align-items:center;gap:7px}
+.graph-legend-node{width:9px;height:9px;border-radius:50%;background:#819a84;display:inline-block}
+.graph-legend-link{width:18px;height:1px;background:#87998a;display:inline-block;position:relative}
+.graph-legend-link:after{content:'';position:absolute;right:-1px;top:-3px;border-left:5px solid #87998a;border-top:3px solid transparent;border-bottom:3px solid transparent}
+@media(max-width:560px){.graph-summary{align-items:flex-start;flex-direction:column}.graph-summary span{text-align:left}.graph-view svg{height:480px;min-height:400px}.graph-caption{gap:10px;padding:10px 12px}}

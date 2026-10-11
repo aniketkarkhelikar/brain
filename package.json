@@ -6,7 +6,7 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "tsx src/ui/server.ts",
-    "test": "tsx --test src/agent.test.ts src/tools/vault-tools.test.ts src/tools/web-search.test.ts src/types/chat.test.ts src/memory/session.test.ts src/memory/bootstrap.test.ts src/memory/search.test.ts src/heartbeat/audit.test.ts src/heartbeat/ingest.test.ts src/cli.test.ts",
+    "test": "tsx --test src/agent.test.ts src/providers.test.ts src/tools/vault-tools.test.ts src/tools/web-search.test.ts src/types/chat.test.ts src/memory/session.test.ts src/memory/bootstrap.test.ts src/memory/search.test.ts src/heartbeat/audit.test.ts src/heartbeat/ingest.test.ts src/heartbeat/memory-audit.test.ts src/skills/loader.test.ts src/cli.test.ts",
     "index:vault": "tsx src/memory/index-vault.ts",
     "test:embeddings": "tsx src/test-embeddings.ts",
     "test:memory": "tsx src/test-memory-search.ts",
@@ -23,6 +23,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^4.0.91",
     "ai": "^7.0.0",
     "better-sqlite3": "^11.7.0",
     "chalk": "^5.4.1",

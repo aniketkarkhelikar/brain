@@ -19,12 +19,27 @@ function decodeDdgUrl(raw: string): string {
   }
 }
 
+function decodeBingUrl(raw: string): string {
+  const unescaped = decodeEntities(raw.replaceAll('&amp;', '&'));
+  try {
+    const wrapped = new URL(unescaped);
+    if (!wrapped.hostname.endsWith('bing.com') || wrapped.pathname !== '/ck/a') return unescaped;
+    const encoded = wrapped.searchParams.get('u');
+    if (!encoded?.startsWith('a1')) return unescaped;
+    const target = Buffer.from(encoded.slice(2), 'base64url').toString('utf8');
+    const decoded = new URL(target);
+    return ['http:', 'https:'].includes(decoded.protocol) && !decoded.username && !decoded.password ? decoded.href : unescaped;
+  } catch {
+    return unescaped;
+  }
+}
+
 function stripHtml(raw: string): string {
   return decodeEntities(raw.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
 }
 
 function decodeEntities(raw: string): string {
-  return raw.replace(/&(#x[\da-f]+|#\d+|quot|apos|lt|gt|amp);/gi, (whole, entity: string) => {
+  return raw.replace(/&(#x[\da-f]+|#\d+|quot|apos|lt|gt|amp|nbsp);/gi, (whole, entity: string) => {
     if (entity[0] === '#') {
       const codePoint = entity[1]?.toLowerCase() === 'x'
         ? Number.parseInt(entity.slice(2), 16)
@@ -33,7 +48,7 @@ function decodeEntities(raw: string): string {
         ? String.fromCodePoint(codePoint)
         : whole;
     }
-    return ({ quot: '"', apos: "'", lt: '<', gt: '>', amp: '&' } as Record<string, string>)[entity.toLowerCase()] || whole;
+    return ({ quot: '"', apos: "'", lt: '<', gt: '>', amp: '&', nbsp: ' ' } as Record<string, string>)[entity.toLowerCase()] || whole;
   });
 }
 
@@ -63,6 +78,51 @@ export function parseBraveSearchResponse(raw: string, maxResults = 5): WebSearch
   return web.results.map(safeResult).filter((item): item is WebSearchResultItem => Boolean(item)).slice(0, maxResults);
 }
 
+export function parseExaSearchResponse(raw: string, maxResults = 5): WebSearchResultItem[] {
+  let payload: unknown;
+  try { payload = JSON.parse(raw); } catch { throw new Error('Exa Search returned invalid JSON.'); }
+  if (!payload || typeof payload !== 'object' || !Array.isArray((payload as { results?: unknown }).results)) {
+    throw new Error('Exa Search response did not include web results.');
+  }
+  return (payload as { results: unknown[] }).results.map((value) => {
+    if (!value || typeof value !== 'object') return undefined;
+    const item = value as { title?: unknown; url?: unknown; highlights?: unknown; publishedDate?: unknown };
+    const highlights = Array.isArray(item.highlights) ? item.highlights.filter((entry): entry is string => typeof entry === 'string') : [];
+    const date = typeof item.publishedDate === 'string' ? 'Published: ' + item.publishedDate + '. ' : '';
+    return safeResult({
+      title: item.title,
+      url: item.url,
+      description: date + highlights.join(' '),
+    });
+  }).filter((item): item is WebSearchResultItem => Boolean(item)).slice(0, maxResults);
+}
+
+export async function performExaSearch(
+  query: string,
+  maxResults = 5,
+  apiKey = process.env.EXA_API_KEY,
+  fetcher: typeof fetch = fetch,
+): Promise<WebSearchResultItem[]> {
+  if (!apiKey?.trim()) throw new Error('Exa Search is not configured. Set EXA_API_KEY in the process environment.');
+  let response: Response;
+  try {
+    response = await fetcher('https://api.exa.ai/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey.trim() },
+      body: JSON.stringify({ query, type: 'auto', contents: { highlights: true } }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(12_000),
+    });
+  } catch {
+    throw new Error('Exa Search request failed before a response was received.');
+  }
+  if (!response.ok) throw new Error('Exa Search returned HTTP ' + response.status + '.');
+  if (!/^application\/json(?:;|$)/i.test(response.headers.get('content-type') || '')) {
+    throw new Error('Exa Search did not return JSON results.');
+  }
+  return parseExaSearchResponse(await response.text(), maxResults);
+}
+
 export function parseDdgHtml(html: string, maxResults = 5): WebSearchResultItem[] {
   if (/anomaly-modal|anomaly\.js|automated requests|select all squares|bot challenge/i.test(html)) {
     throw new Error('DuckDuckGo returned an anti-bot challenge instead of search results.');
@@ -84,6 +144,25 @@ export function parseDdgHtml(html: string, maxResults = 5): WebSearchResultItem[
     title: sanitizeUntrustedContent(item.title).text,
     snippet: sanitizeUntrustedContent(snippets[index] || '').text,
   }));
+}
+
+export function parseBingSearchHtml(html: string, maxResults = 5): WebSearchResultItem[] {
+  if (/captcha|verify you are human|unusual traffic/i.test(html) && !/class="b_algo"/i.test(html)) {
+    throw new Error('Bing returned an anti-bot challenge instead of search results.');
+  }
+  const results: WebSearchResultItem[] = [];
+  const blocks = html.matchAll(/<li\b[^>]*class="[^"]*\bb_algo\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi);
+  for (const block of blocks) {
+    const contents = block[1];
+    const heading = contents.match(/<h2\b[^>]*>\s*<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h2>/i);
+    if (!heading) continue;
+    const caption = contents.match(/<div\b[^>]*class="[^"]*\bb_caption\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i)?.[1] || '';
+    const description = caption.match(/<p\b[^>]*>([\s\S]*?)<\/p>/i)?.[1] || '';
+    const result = safeResult({ title: stripHtml(heading[2]), url: decodeBingUrl(heading[1]), description: stripHtml(description) });
+    if (result) results.push(result);
+    if (results.length >= maxResults) break;
+  }
+  return results;
 }
 
 function rejectSensitiveQuery(query: string): void {
@@ -133,30 +212,79 @@ export async function performBraveSearch(
   return parseBraveSearchResponse(response.body, maxResults);
 }
 
+export async function performBingSearch(
+  query: string,
+  maxResults = 5,
+  fetcher: typeof fetchSafePage = fetchSafePage,
+): Promise<WebSearchResultItem[]> {
+  const endpoint = new URL('https://www.bing.com/search');
+  endpoint.searchParams.set('q', query);
+  endpoint.searchParams.set('count', '20');
+  const country = (process.env.WEB_SEARCH_COUNTRY || 'IN').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(country)) throw new Error('WEB_SEARCH_COUNTRY must be a two-letter country code.');
+  endpoint.searchParams.set('mkt', `en-${country}`);
+  endpoint.searchParams.set('setlang', 'en');
+  const response = await fetcher(endpoint.href);
+  if (!/^(text\/html|application\/xhtml\+xml)(?:;|$)/i.test(response.contentType)) throw new Error('Bing did not return an HTML results page.');
+  const results = rankSearchResults(query, parseBingSearchHtml(response.body, 20)).slice(0, maxResults);
+  if (!results.length) throw new Error('Bing returned no results matching the query terms.');
+  return results;
+}
+
+function rankSearchResults(query: string, results: WebSearchResultItem[]): WebSearchResultItem[] {
+  const ignored = new Set(['about', 'after', 'best', 'from', 'guide', 'how', 'into', 'latest', 'more', 'news', 'official', 'page', 'search', 'site', 'the', 'what', 'when', 'where', 'which', 'with', 'www', 'com', 'org', 'net']);
+  const wanted = [...new Set(query.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) || [])].filter((word) => word.length > 2 && !ignored.has(word));
+  return results.map((result, index) => {
+    const searchable = `${result.title} ${result.url} ${result.snippet}`.toLocaleLowerCase();
+    const score = wanted.reduce((sum, word) => sum + (searchable.includes(word) ? (result.title.toLocaleLowerCase().includes(word) ? 3 : result.url.toLocaleLowerCase().includes(word) ? 2 : 1) : 0), 0);
+    return { result, index, score };
+  }).filter(({ score }) => score > 0).sort((left, right) => right.score - left.score || left.index - right.index).map(({ result }) => result);
+}
+
+async function performFallbackSearch(query: string, maxResults: number, priorErrors: string[] = []): Promise<WebSearchResultItem[]> {
+  const errors: string[] = [...priorErrors];
+  for (const [name, provider] of [['DuckDuckGo', performDdgSearch], ['Bing', performBingSearch]] as const) {
+    try {
+      const results = await provider(query, maxResults);
+      if (results.length) return results;
+      errors.push(`${name}: returned no results`);
+    } catch (error) {
+      errors.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw new Error(`Web search failed (${errors.join('; ')}).`);
+}
+
 export async function performWebSearch(query: string, maxResults = 5): Promise<WebSearchResultItem[]> {
   const safeQuery = query.trim();
   if (!safeQuery) throw new Error('Enter a search query.');
   rejectSensitiveQuery(safeQuery);
+  const providerErrors: string[] = [];
+  const exaApiKey = process.env.EXA_API_KEY;
+  if (exaApiKey?.trim()) {
+    try {
+      const results = await performExaSearch(safeQuery, maxResults, exaApiKey);
+      if (results.length) return results;
+      providerErrors.push('Exa Search: returned no results');
+    } catch (error) {
+      providerErrors.push(`Exa Search: ${error instanceof Error ? error.message : 'request failed'}`);
+    }
+  }
   const apiKey = process.env.BRAVE_SEARCH_API_KEY;
   if (apiKey?.trim()) {
     try {
       const results = await performBraveSearch(safeQuery, maxResults, apiKey);
       if (results.length) return results;
-    } catch (braveError) {
-      try {
-        const results = await performDdgSearch(safeQuery, maxResults);
-        if (results.length) return results;
-        throw new Error('Search providers returned no results.');
-      } catch (ddgError) {
-        throw new Error(`Web search failed (Brave: ${braveError instanceof Error ? braveError.message : String(braveError)}; DuckDuckGo: ${ddgError instanceof Error ? ddgError.message : String(ddgError)}).`);
-      }
+      providerErrors.push('Brave Search: returned no results');
+    } catch (error) {
+      providerErrors.push(`Brave Search: ${error instanceof Error ? error.message : 'request failed'}`);
     }
   }
-  return performDdgSearch(safeQuery, maxResults);
+  return performFallbackSearch(safeQuery, maxResults, providerErrors);
 }
 
 export const webSearch: Tool<WebSearchInput, WebSearchOutput> = tool({
-  description: 'Search the public web for current information. Use generic terms only; never include personal vault details, identifiers, or private documents. Results stay in the conversation and are not saved to the vault.',
+  description: 'Search the public web for candidate sources. Search titles and snippets are leads only, not verified evidence; for factual research, open relevant result pages with webRead before relying on them. Use generic terms only; never include personal vault details, identifiers, or private documents. Results stay in the conversation and are not saved to the vault.',
   inputSchema: z.object({
     query: z.string().min(1).max(300),
     maxResults: z.number().int().min(1).max(10).default(5),

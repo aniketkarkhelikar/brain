@@ -138,6 +138,369 @@ describe('Phase 6 Inbox compiler and heartbeat', () => {
     assert.equal((recoveredPage.match(/Personal knowledge systems collect/g) ?? []).length, 1);
   });
 
+  it('prioritizes several explicitly linked notes as compiler candidates', async () => {
+    await resetVault();
+    const linkedPaths = [
+      'Work/risks/dataset-coverage.md',
+      'Work/risks/latency-budget.md',
+      'Knowledgebase/concepts/calibration.md',
+    ];
+    for (const filePath of linkedPaths) await write(filePath, '# ' + path.posix.basename(filePath, '.md') + '\n');
+    await write('Work/projects/unrelated.md', '# Unrelated project\n');
+    await write('Inbox/notes/cross-file.md', '---\nprocessed: false\n---\n\nA correction spans several related notes. '
+      + linkedPaths.map((filePath) => '[[' + filePath.replace(/\.md$/i, '') + ']]').join(' ') + '\n');
+    let plannedPaths: string[] = [];
+    const result = await ingestInbox(baseOptions({
+      search: async (query) => ({
+        success: true, query, totalMatches: 1, truncated: false,
+        results: [{
+          file: 'Work/projects/unrelated.md', path: 'Work/projects/unrelated.md', title: 'Unrelated project',
+          description: 'Unrelated.', tags: [], chunkIndex: 0, score: 1, snippet: 'Unrelated.', matches: ['Unrelated.'],
+        }],
+      }),
+      generatePlan: async ({ candidates }) => {
+        plannedPaths = candidates.map((candidate) => candidate.path);
+        return {
+          decision: 'needs_review', targetPath: null, category: null,
+          title: 'Cross-file correction', summary: '', body: '', rationale: 'The test only inspects linked candidate routing.',
+        };
+      },
+    }));
+    assert.deepEqual(plannedPaths.slice(0, linkedPaths.length), linkedPaths);
+    assert.ok(plannedPaths.includes('Work/projects/unrelated.md'));
+    assert.equal(result.needsReview, 1);
+  });
+
+  it('repairs a paraphrased state quote from one unique dated source sentence and archives the capture', async () => {
+    await resetVault();
+    const targetPath = 'Work/risks/dataset-coverage.md';
+    const oldClaim = '- **Coverage Status** (2026-10-01): 68% coverage';
+    await write(targetPath, `# Dataset coverage\n\n## Current State\n\n${oldClaim}\n`);
+    const sourcePath = 'Inbox/field-notes/pilot-update.md';
+    await write(sourcePath, [
+      '---', 'processed: false', '---', '',
+      'The pilot has a new coverage reading.',
+      '2026-10-10: Current measured dataset coverage is 84%; the next review is 2026-10-13.',
+    ].join('\n'));
+    const result = await ingestInbox(baseOptions({
+      search: async (query) => ({
+        success: true, query, totalMatches: 1, truncated: false,
+        results: [{ file: targetPath, path: targetPath, title: 'Dataset coverage', description: 'Coverage risk.', tags: [], chunkIndex: 0, score: 0.9, snippet: '68% coverage', matches: ['68% coverage'] }],
+      }),
+      generatePlan: async () => ({
+        decision: 'update', targetPath, category: null,
+        title: 'Dataset coverage', summary: '', body: 'The pilot measurement was updated.', rationale: 'The capture has a newer measurement.',
+        stateChanges: [{
+          key: 'coverage-status',
+          currentText: 'Current dataset coverage is 84%',
+          supersededText: [oldClaim],
+          evidence: '2026-10-10: Current measured dataset coverage is 84%; the next review is 2026-10-13.',
+        }],
+      }),
+    }));
+    assert.equal(result.updated, 1, JSON.stringify(result));
+    assert.equal(result.needsReview, 0, JSON.stringify(result));
+    const updated = await fs.readFile(path.join(vaultPath, targetPath), 'utf8');
+    assert.match(updated, /> Superseded \d{4}-\d{2}-\d{2} — \*\*Coverage Status\*\*/);
+    assert.match(updated, /Current measured dataset coverage is 84%; the next review is 2026-10-13\./);
+    const archived = matter(await fs.readFile(await archivedInboxPath(sourcePath), 'utf8'));
+    assert.equal(archived.data.processed, true);
+  });
+
+  it('repairs an exact source quote when the state label uses different words from the dated sentence', async () => {
+    await resetVault();
+    const targetPath = 'Work/decisions/evaluation-gate.md';
+    const oldClaim = '- **Release Threshold** (2026-10-01): 68% coverage';
+    const sourceQuote = '2026-10-10: The general rollout gate is 90% dataset coverage, 0.92 citation precision, and p95 latency at or below 1.8 seconds.';
+    await write(targetPath, `# Evaluation gate\n\n## Current State\n\n${oldClaim}\n`);
+    await write('Inbox/notes/gate-update.md', `---\ndate: 2026-10-10\n---\n\n${sourceQuote}\n`);
+    const result = await ingestInbox(baseOptions({
+      search: async (query) => ({
+        success: true, query, totalMatches: 1, truncated: false,
+        results: [{ file: targetPath, path: targetPath, title: 'Evaluation gate', description: 'Rollout requirements.', tags: [], chunkIndex: 0, score: 1, snippet: oldClaim, matches: [oldClaim] }],
+      }),
+      generatePlan: async () => ({
+        decision: 'update', targetPath, category: null,
+        title: 'Evaluation gate', summary: '', body: 'The general rollout threshold changed.', rationale: 'A dated gate update.',
+        stateChanges: [{ key: 'release_threshold', currentText: '90% coverage, 0.92 precision, and 1.8 second latency', supersededText: [oldClaim], evidence: sourceQuote }],
+      }),
+    }));
+    assert.equal(result.updated, 1, JSON.stringify(result));
+    assert.equal(result.needsReview, 0);
+    assert.match(await fs.readFile(path.join(vaultPath, targetPath), 'utf8'), /90% dataset coverage, 0\.92 citation precision/);
+  });
+
+  it('matches camelCase state keys against dated source language and auto-updates the distinction', async () => {
+    await resetVault();
+    const targetPath = 'Knowledgebase/concepts/retrieval-quality.md';
+    const oldClaim = '- **Calibration distinction** (2026-10-01): Retrieval calibration and citation precision were treated as the same measure';
+    const sourceQuote = '2026-10-10: Do not confuse retrieval calibration with citation precision.';
+    await write(targetPath, '# Retrieval quality\n\n## Current State\n\n' + oldClaim + '\n');
+    await write('Inbox/notes/calibration-distinction.md', '---\ndate: 2026-10-10\n---\n\n' + sourceQuote + '\n');
+    const result = await ingestInbox(baseOptions({
+      search: async (query) => ({
+        success: true, query, totalMatches: 1, truncated: false,
+        results: [{ file: targetPath, path: targetPath, title: 'Retrieval quality', description: 'Evaluation concepts.', tags: [], chunkIndex: 0, score: 1, snippet: oldClaim, matches: [oldClaim] }],
+      }),
+      generatePlan: async () => ({
+        decision: 'update', targetPath, category: null,
+        title: 'Retrieval quality', summary: '', body: 'The two quality measures have separate meanings.', rationale: 'The capture corrects a conflated distinction.',
+        stateChanges: [{ key: 'calibrationDistinction', currentText: 'Retrieval calibration differs from citation precision', supersededText: [oldClaim], evidence: sourceQuote }],
+      }),
+    }));
+    assert.equal(result.updated, 1, JSON.stringify(result));
+    assert.equal(result.needsReview, 0, JSON.stringify(result));
+    const updated = await fs.readFile(path.join(vaultPath, targetPath), 'utf8');
+    assert.match(updated, /> Superseded \d{4}-\d{2}-\d{2} — \*\*Calibration distinction\*\*/);
+    assert.match(updated, /2026-10-10: Do not confuse retrieval calibration with citation precision\./);
+  });
+
+  it('infers one strongly labeled old state line when the model omits its superseded quote', async () => {
+    await resetVault();
+    const targetPath = 'Work/risks/dataset-coverage.md';
+    const oldClaim = '- **Measured coverage** (2026-10-01): 68%';
+    const sourceQuote = '2026-10-10: Measured dataset coverage is now 84%.';
+    await write(targetPath, '# Dataset coverage\n\n## Current State\n\n' + oldClaim
+      + '\n\nHistorical context: the old source map had several gaps. This paragraph remains useful history.\n');
+    await write('Inbox/notes/coverage-rerun.md', '---\ndate: 2026-10-10\nprocessed: false\n---\n\n' + sourceQuote + '\n');
+    const result = await ingestInbox(baseOptions({
+      search: async (query) => ({
+        success: true, query, totalMatches: 1, truncated: false,
+        results: [{ file: targetPath, path: targetPath, title: 'Dataset coverage', description: 'Coverage risk.', tags: [], chunkIndex: 0, score: 1, snippet: oldClaim, matches: [oldClaim] }],
+      }),
+      generatePlan: async () => ({
+        decision: 'update', targetPath, category: null,
+        title: 'Dataset coverage', summary: '', body: 'The rerun improved coverage.', rationale: 'A newer measurement.',
+        stateChanges: [{ key: 'measuredCoverage', currentText: sourceQuote, supersededText: [], evidence: sourceQuote }],
+      }),
+    }));
+    assert.equal(result.updated, 1, JSON.stringify(result));
+    assert.equal(result.needsReview, 0, JSON.stringify(result));
+    const updated = await fs.readFile(path.join(vaultPath, targetPath), 'utf8');
+    assert.match(updated, /> Superseded \d{4}-\d{2}-\d{2} — \*\*Measured coverage\*\* \(2026-10-01\): 68%/);
+    assert.match(updated, /Historical context: the old source map had several gaps\. This paragraph remains useful history\./);
+    assert.match(updated, /- \*\*Measured coverage\*\* — 2026-10-10: Measured dataset coverage is now 84%/);
+  });
+
+  it('uses one exact dated paragraph when a gate update spans multiple sentences and keeps one Current State section', async () => {
+    await resetVault();
+    const targetPath = 'Work/decisions/evaluation-gate.md';
+    const oldClaim = '- **Release Threshold** (2026-10-01): 68% coverage';
+    const sourceQuote = '2026-10-10: The general rollout gate is 90% dataset coverage and 0.92 citation precision. The team also requires p95 latency at or below 1.8 seconds.';
+    await write(targetPath, `# Evaluation gate\n\n## Current State\n\n${oldClaim}\n`);
+    await write('Inbox/notes/gate-update.md', `---\ndate: 2026-10-10\n---\n\n${sourceQuote}\n`);
+    const result = await ingestInbox(baseOptions({
+      search: async (query) => ({
+        success: true, query, totalMatches: 1, truncated: false,
+        results: [{ file: targetPath, path: targetPath, title: 'Evaluation gate', description: 'Rollout requirements.', tags: [], chunkIndex: 0, score: 1, snippet: oldClaim, matches: [oldClaim] }],
+      }),
+      generatePlan: async () => ({
+        decision: 'update', targetPath, category: null,
+        title: 'Evaluation gate', summary: '', body: 'The gate now combines coverage, citation precision, and latency.', rationale: 'Dated rollout requirements.',
+        stateChanges: [{
+          key: 'release_threshold',
+          currentText: '90% coverage, 0.92 precision, and p95 latency of 1.8 seconds',
+          supersededText: [oldClaim],
+          evidence: sourceQuote,
+        }],
+      }),
+    }));
+    assert.equal(result.updated, 1, JSON.stringify(result));
+    const updated = await fs.readFile(path.join(vaultPath, targetPath), 'utf8');
+    assert.equal((updated.match(/^## Current State$/gm) || []).length, 1);
+    assert.match(updated, /2026-10-10: The general rollout gate is 90% dataset coverage and 0\.92 citation precision\. The team also requires p95 latency at or below 1\.8 seconds\./);
+    assert.match(updated, /> Superseded \d{4}-\d{2}-\d{2} — \*\*Release Threshold\*\*/);
+  });
+
+  it('upserts several state keys into one Current State section', async () => {
+    await resetVault();
+    const targetPath = 'Work/risks/dataset-coverage.md';
+    const oldCoverage = '- **Measured coverage** (2026-10-01): 68%';
+    const oldThreshold = '- **Release threshold** (2026-10-01): 80%';
+    const coverageQuote = '2026-10-10: Current measured dataset coverage is 84%.';
+    const thresholdQuote = '2026-10-10: The release threshold is 90%.';
+    await write(targetPath, `# Dataset coverage\n\n## Current State\n\n${oldCoverage}\n${oldThreshold}\n`);
+    await write('Inbox/notes/coverage-update.md', `---\ndate: 2026-10-10\n---\n\n${coverageQuote}\n\n${thresholdQuote}\n`);
+    const result = await ingestInbox(baseOptions({
+      search: async (query) => ({
+        success: true, query, totalMatches: 1, truncated: false,
+        results: [{ file: targetPath, path: targetPath, title: 'Dataset coverage', description: 'Coverage risk.', tags: [], chunkIndex: 0, score: 1, snippet: oldCoverage, matches: [oldCoverage] }],
+      }),
+      generatePlan: async () => ({
+        decision: 'update', targetPath, category: null,
+        title: 'Dataset coverage', summary: '', body: 'Coverage is below the general rollout gate.', rationale: 'Dated measurements.',
+        stateChanges: [
+          { key: 'measured_coverage', currentText: coverageQuote, supersededText: [oldCoverage], evidence: coverageQuote },
+          { key: 'release_threshold', currentText: thresholdQuote, supersededText: [oldThreshold], evidence: thresholdQuote },
+        ],
+      }),
+    }));
+    assert.equal(result.updated, 1, JSON.stringify(result));
+    const updated = await fs.readFile(path.join(vaultPath, targetPath), 'utf8');
+    assert.equal((updated.match(/^## Current State$/gm) || []).length, 1);
+    assert.match(updated, /\*\*Measured coverage\*\*/);
+    assert.match(updated, /\*\*Release threshold\*\*/);
+  });
+
+  it('offers USER.md as an editable candidate for dated profile changes and preserves superseded values', async () => {
+    await resetVault();
+    const targetPath = 'USER.md';
+    const oldProject = '- **Active project** (2026-09-18): Atlas migration';
+    const oldTimezone = '- **Timezone** (2026-09-18): Asia/Kolkata';
+    const projectQuote = '2026-10-12: Maya confirmed the active project is Harbor pilot; the earlier Atlas migration is paused and historical.';
+    const timezoneQuote = '2026-10-12: Maya confirmed her working timezone is Europe/London; the previous Asia/Kolkata setting is obsolete.';
+    await write(targetPath, `# User profile\n\n## Current State\n${oldProject}\n${oldTimezone}\n`);
+    await write('Inbox/field-notes/profile-transition.md', `---\ndate: 2026-10-12\n---\n\n${projectQuote}\n${timezoneQuote}\n`);
+    const result = await ingestInbox(baseOptions({
+      search: async (query) => ({ success: true, query, totalMatches: 0, truncated: false, results: [] }),
+      generatePlan: async ({ candidates }) => {
+        assert.ok(candidates.some((candidate) => candidate.path === targetPath && candidate.editable));
+        return {
+          decision: 'update', targetPath, category: null,
+          title: 'User profile', summary: '', body: 'Current project and timezone confirmed.', rationale: 'Dated changes to user profile.',
+          stateChanges: [
+            { key: 'active_project', currentText: projectQuote, supersededText: [oldProject], evidence: projectQuote },
+            { key: 'timezone', currentText: timezoneQuote, supersededText: [oldTimezone], evidence: timezoneQuote },
+          ],
+        };
+      },
+    }));
+    assert.equal(result.updated, 1, JSON.stringify(result));
+    assert.equal(result.needsReview, 0);
+    const updated = await fs.readFile(path.join(vaultPath, targetPath), 'utf8');
+    assert.equal((updated.match(/^## Current State$/gm) || []).length, 1);
+    assert.match(updated, /> Superseded \d{4}-\d{2}-\d{2} — \*\*Active project\*\*/);
+    assert.match(updated, /> Superseded \d{4}-\d{2}-\d{2} — \*\*Timezone\*\*/);
+    assert.match(updated, /active project is Harbor pilot/);
+    assert.match(updated, /working timezone is Europe\/London/);
+  });
+
+  it('strips model-generated state sections from update log prose', async () => {
+    await resetVault();
+    const targetPath = 'Knowledgebase/concepts/calibration.md';
+    await write(targetPath, '# Calibration\n\n## Current State\n\nCalibration and citation precision are different measures.\n');
+    await write('Inbox/notes/calibration-update.md', '2026-10-11: Calibration is distinct from citation precision, and both measures are independently evaluated.\n');
+    const result = await ingestInbox(baseOptions({
+      search: async (query) => ({ success: true, query, totalMatches: 1, truncated: false, results: [{ file: targetPath, path: targetPath, title: 'Calibration', description: 'Calibration definitions.', tags: [], chunkIndex: 0, score: 1, snippet: 'Calibration and citation precision are different measures.', matches: [] }] }),
+      generatePlan: async () => ({
+        decision: 'update', targetPath, category: null, title: 'Calibration', summary: '',
+        body: 'The measures are distinct and should be evaluated separately.\n\n## Current State\n- **Calibration** (2026-10-11): calibration is distinct from citation precision.\n### Superseded History\n- Earlier comparison\nSource: Inbox/notes/calibration-update.md',
+        rationale: 'The dated correction separates two metrics.',
+        stateChanges: [{ key: 'calibration definition', currentText: '2026-10-11: Calibration is distinct from citation precision, and both measures are independently evaluated.', supersededText: [], evidence: '2026-10-11: Calibration is distinct from citation precision, and both measures are independently evaluated.' }],
+      }),
+    }));
+    assert.equal(result.updated, 1, JSON.stringify(result));
+    const updated = await fs.readFile(path.join(vaultPath, targetPath), 'utf8');
+    assert.equal((updated.match(/^## Current State$/gm) || []).length, 1);
+    assert.equal((updated.match(/^### Superseded History$/gm) || []).length, 0);
+    assert.match(updated, /The measures are distinct and should be evaluated separately\./);
+    assert.doesNotMatch(updated, /Source: \[\[Inbox\//);
+  });
+
+  it('maps a differently named state key to one current line with a unique strong value match', async () => {
+    await resetVault();
+    const targetPath = 'Work/projects/atlas.md';
+    const oldClaim = '- **Status** (2026-09-18): Paused before pilot pending dataset coverage and citation evaluation.';
+    const sourceQuote = '2026-10-10: Atlas migration is paused and historical after the active project changed to Harbor pilot.';
+    await write(targetPath, `# Atlas migration\n\n## Current State\n\n${oldClaim}\n`);
+    await write('Inbox/notes/project-change.md', `---\ndate: 2026-10-10\n---\n\n${sourceQuote}\n`);
+    const result = await ingestInbox(baseOptions({
+      search: async (query) => ({
+        success: true, query, totalMatches: 1, truncated: false,
+        results: [{ file: targetPath, path: targetPath, title: 'Atlas migration', description: 'A paused migration.', tags: [], chunkIndex: 0, score: 1, snippet: oldClaim, matches: [oldClaim] }],
+      }),
+      generatePlan: async () => ({
+        decision: 'update', targetPath, category: null,
+        title: 'Atlas migration', summary: '', body: 'The earlier project is now historical.', rationale: 'Dated project transition.',
+        stateChanges: [{ key: 'project change', currentText: sourceQuote, supersededText: ['The Atlas project was paused before Harbor.'], evidence: sourceQuote }],
+      }),
+    }));
+    assert.equal(result.updated, 1, JSON.stringify(result));
+    assert.equal(result.needsReview, 0);
+    const updated = await fs.readFile(path.join(vaultPath, targetPath), 'utf8');
+    assert.match(updated, /> Superseded \d{4}-\d{2}-\d{2} — \*\*Status\*\*/);
+    assert.match(updated, /2026-10-10: Atlas migration is paused and historical after the active project changed to Harbor pilot\./);
+  });
+
+  it('keeps an already-current same-date numeric value without holding the whole capture for review', async () => {
+    await resetVault();
+    const targetPath = 'Work/risks/dataset-coverage.md';
+    const oldClaim = '- **Release threshold** (2026-10-10): 90%';
+    const sourceQuote = '2026-10-10: The general rollout gate is 90% dataset coverage, 0.92 citation precision, and p95 latency at or below 1.8 seconds.';
+    await write(targetPath, `# Dataset coverage\n\n## Current State\n\n${oldClaim}\n`);
+    await write('Inbox/notes/repeated-threshold.md', `---\ndate: 2026-10-10\n---\n\n${sourceQuote}\n`);
+    const result = await ingestInbox(baseOptions({
+      search: async (query) => ({
+        success: true, query, totalMatches: 1, truncated: false,
+        results: [{ file: targetPath, path: targetPath, title: 'Dataset coverage', description: 'Risk note.', tags: [], chunkIndex: 0, score: 1, snippet: oldClaim, matches: [oldClaim] }],
+      }),
+      generatePlan: async () => ({
+        decision: 'update', targetPath, category: null,
+        title: 'Dataset coverage', summary: '', body: 'The dated update repeats the current release threshold.', rationale: 'The same value is already current.',
+        stateChanges: [{ key: 'release_threshold', currentText: sourceQuote, supersededText: ['The general release threshold remains 90%.'], evidence: sourceQuote }],
+      }),
+    }));
+    assert.equal(result.updated, 1, JSON.stringify(result));
+    assert.equal(result.needsReview, 0);
+    const updated = await fs.readFile(path.join(vaultPath, targetPath), 'utf8');
+    assert.equal((updated.match(/\*\*Release threshold\*\*/g) ?? []).length, 1);
+    assert.match(updated, /The dated update repeats the current release threshold/);
+  });
+
+  it('ingests dated captures in chronological order so later notes can reuse fresh compiled evidence', async () => {
+    await resetVault();
+    await write('Inbox/a-later.md', '---\ntitle: Later\ndate: 2026-10-11\n---\n\nLater source.\n');
+    await write('Inbox/z-earlier.md', '---\ntitle: Earlier\ndate: 2026-10-10\n---\n\nEarlier source.\n');
+    const observed: string[] = [];
+    const result = await ingestInbox(baseOptions({
+      search: emptySearch(),
+      generatePlan: async ({ sourcePath }) => {
+        observed.push(sourcePath);
+        return {
+          decision: 'create', targetPath: null, category: 'Knowledgebase/concepts',
+          title: sourcePath.includes('earlier') ? 'Earlier source' : 'Later source',
+          summary: '', body: 'A dated capture.', rationale: 'A standalone dated concept.',
+        };
+      },
+    }));
+    assert.deepEqual(observed, ['Inbox/z-earlier.md', 'Inbox/a-later.md']);
+    assert.equal(result.created, 2);
+    assert.equal(result.needsReview, 0);
+  });
+
+  it('retries a malformed multiline state key once and commits only the exact repaired plan', async () => {
+    await resetVault();
+    const targetPath = 'Work/projects/harbor.md';
+    const oldClaim = '- **Owner** (2026-09-01): Mina';
+    const sourceQuote = '2026-10-10: The owner changed from Mina to Imani.';
+    await write(targetPath, `# Harbor\n\n## Current State\n\n${oldClaim}\n`);
+    await write('Inbox/notes/owner-change.md', `---\ndate: 2026-10-10\n---\n\n${sourceQuote}\n`);
+    let planCalls = 0;
+    const result = await ingestInbox(baseOptions({
+      search: async (query) => ({
+        success: true, query, totalMatches: 1, truncated: false,
+        results: [{ file: targetPath, path: targetPath, title: 'Harbor', description: 'Project note.', tags: [], chunkIndex: 0, score: 1, snippet: oldClaim, matches: [oldClaim] }],
+      }),
+      generatePlan: async () => {
+        planCalls += 1;
+        return {
+          decision: 'update', targetPath, category: null,
+          title: 'Harbor', summary: '', body: 'The project owner changed.', rationale: 'Dated change.',
+          stateChanges: [{
+            key: planCalls === 1 ? 'Owner\nstatus' : 'Owner',
+            currentText: sourceQuote,
+            supersededText: [planCalls === 1 ? 'Mina used to own this project' : oldClaim],
+            evidence: sourceQuote,
+          }],
+        };
+      },
+    }));
+    assert.equal(planCalls, 2);
+    assert.equal(result.updated, 1, JSON.stringify(result));
+    assert.equal(result.needsReview, 0);
+    assert.match(await fs.readFile(path.join(vaultPath, targetPath), 'utf8'), /\*\*Owner\*\* — 2026-10-10: The owner changed from Mina to Imani\./);
+  });
+
   it('parks ambiguous or oversized input for review and retries it only when asked', async () => {
     await resetVault();
     await write('Inbox/notes/ambiguous.md', '---\nprocessed: false\n---\n\nA note with unclear destination.\n');
@@ -383,10 +746,10 @@ describe('Phase 6 Inbox compiler and heartbeat', () => {
     const result = await runHeartbeat({ ...baseOptions(), now: () => fixed, timezone: 'Asia/Kolkata' });
     assert.equal(result.ingestion.scanned, 0);
     const daily = await fs.readFile(path.join(vaultPath, 'daily/2026-09-24.md'), 'utf8');
-    assert.match(daily, /Heartbeat/);
+    assert.match(daily, /Inbox processing/);
     assert.match(daily, /Inbox Markdown files scanned: 0/);
     const log = await fs.readFile(path.join(vaultPath, 'log.md'), 'utf8');
-    assert.match(log, /heartbeat scanned 0/);
+    assert.match(log, /Inbox processing scanned 0/);
   });
 
   it('starts and cleanly stops the scheduled heartbeat task', () => {

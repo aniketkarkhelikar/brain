@@ -16,6 +16,7 @@ import { compactHistory, DEFAULT_SESSION_ID, normalizeConversationMessages, Sess
 import { getBootstrapStatus, submitBootstrapAnswer } from '../memory/bootstrap.js';
 import { indexVault, searchVault } from '../memory/search.js';
 import { chatSourcesFromToolResults, normalizeChatSources, type ChatSource, type ToolTraceStep } from '../types/chat.js';
+import { discoverSkills } from '../skills/loader.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.resolve(here, '../../ui');
@@ -183,6 +184,78 @@ async function listFiles(dir = ''): Promise<Array<{ path: string; name: string; 
   await walk(start);
   return rows.sort((a, b) => b.modified.localeCompare(a.modified));
 }
+
+type VaultGraphNode = { path: string; name: string; folder: string; degree: number; inDegree: number; outDegree: number };
+type VaultGraphEdge = { source: string; target: string; kind: 'wikilink' | 'markdown' };
+
+function graphPathKey(value: string): string {
+  return value.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\.md$/i, '').toLocaleLowerCase();
+}
+
+async function readVaultGraph(): Promise<{ nodes: VaultGraphNode[]; edges: VaultGraphEdge[]; unresolved: number }> {
+  const operationalFiles = new Set(['index.md', 'log.md', 'soul.md', 'heartbeat.md', 'bootstrap.md']);
+  const files = (await listFiles())
+    .filter((file) => !operationalFiles.has(file.path.toLocaleLowerCase()) && !file.path.toLocaleLowerCase().startsWith('daily/'))
+    .sort((a, b) => a.path.localeCompare(b.path));
+  const contents = await Promise.all(files.map(async (file) => {
+    try { return [file.path, await fs.readFile(await verifiedVaultPath(file.path), 'utf8')] as const; }
+    catch { return [file.path, ''] as const; }
+  }));
+  const byPath = new Map(files.map((file) => [graphPathKey(file.path), file.path]));
+  const byName = new Map<string, string[]>();
+  for (const file of files) {
+    const key = graphPathKey(file.name);
+    byName.set(key, [...(byName.get(key) || []), file.path]);
+  }
+  const resolve = (source: string, rawTarget: string, relative: boolean): string | undefined => {
+    let target = rawTarget.trim().replaceAll('\\', '/');
+    if (!target || /^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(target)) return undefined;
+    try { target = decodeURIComponent(target); } catch { /* Keep the literal target. */ }
+    target = target.replace(/^<|>$/g, '').split(/[?#]/, 1)[0].trim();
+    if (!/\.md$/i.test(target) && relative) return undefined;
+    const candidates = new Set<string>();
+    if (relative && !target.startsWith('/')) candidates.add(graphPathKey(path.posix.join(path.posix.dirname(source), target)));
+    candidates.add(graphPathKey(target));
+    for (const candidate of candidates) {
+      const exact = byPath.get(candidate);
+      if (exact) return exact;
+    }
+    const base = graphPathKey(path.posix.basename(target));
+    const matches = byName.get(base) || [];
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+  const edgeMap = new Map<string, VaultGraphEdge>();
+  let unresolved = 0;
+  for (const [source, content] of contents) {
+    const links: Array<{ target: string; kind: 'wikilink' | 'markdown' }> = [];
+    for (const match of content.matchAll(/\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g)) {
+      links.push({ target: match[1], kind: 'wikilink' });
+    }
+    for (const match of content.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+      const rawTarget = match[1].trim().replace(/^<|>$/g, '').split(/\s+/, 1)[0];
+      if (/\.md(?:[?#].*)?$/i.test(rawTarget)) links.push({ target: rawTarget, kind: 'markdown' });
+    }
+    for (const link of links) {
+      const target = resolve(source, link.target, link.kind === 'markdown');
+      if (!target) { unresolved += 1; continue; }
+      if (target === source) continue;
+      const key = `${source}\0${target}`;
+      if (!edgeMap.has(key)) edgeMap.set(key, { source, target, kind: link.kind });
+    }
+  }
+  const edges = [...edgeMap.values()];
+  const degree = new Map<string, { incoming: number; outgoing: number }>();
+  for (const file of files) degree.set(file.path, { incoming: 0, outgoing: 0 });
+  for (const edge of edges) {
+    degree.get(edge.source)!.outgoing += 1;
+    degree.get(edge.target)!.incoming += 1;
+  }
+  const nodes = files.map((file) => {
+    const counts = degree.get(file.path)!;
+    return { path: file.path, name: file.name, folder: file.folder, degree: counts.incoming + counts.outgoing, inDegree: counts.incoming, outDegree: counts.outgoing };
+  });
+  return { nodes, edges, unresolved };
+}
 function flattenMessages(messages: ModelMessage[]) {
   const stored = messages.filter((message) => message.role === 'user' || message.role === 'assistant') as StoredModelMessage[];
   return normalizeConversationMessages(messages).map((message, index) => ({
@@ -209,6 +282,10 @@ const server = http.createServer(async (req, res) => {
       const ping = setInterval(() => res.write(': ping\n\n'), 20_000);
       req.on('close', () => { events.off('activity', listener); clearInterval(ping); });
       return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/skills') {
+      const skills = await discoverSkills({ refresh: true });
+      return json(res, 200, skills.map(({ name, description, dirName }) => ({ name, description, dirName })));
     }
     if (req.method === 'GET' && url.pathname === '/api/overview') {
       const queue = await listInboxReviewQueue(vaultRoot);
@@ -319,6 +396,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/brain/files') return json(res, 200, await listFiles(url.searchParams.get('folder') || ''));
+    if (req.method === 'GET' && url.pathname === '/api/brain/graph') return json(res, 200, await readVaultGraph());
     if (req.method === 'GET' && url.pathname === '/api/tasks') {
       const tasks: Array<{ text: string; path: string; line: number; completed: boolean }> = [];
       for (const file of await listFiles()) {

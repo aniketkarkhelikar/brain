@@ -10,7 +10,7 @@ export type ChatSource = {
 export type ToolTraceStep = { name: string; skillName?: string };
 
 export function normalizeToolTrace(steps: ToolTraceStep[]): ToolTraceStep[] {
-  const allowed = new Set(['vaultSearch', 'vaultRead', 'vaultList', 'vaultCatalog', 'webSearch', 'webRead', 'skillLoad', 'vaultWrite']);
+  const allowed = new Set(['vaultSearch', 'vaultRead', 'vaultList', 'vaultCatalog', 'webSearch', 'webRead', 'skillLoad', 'vaultWrite', 'vaultPatch', 'vaultMeta']);
   return steps.flatMap((step) => {
     if (!step || !allowed.has(step.name)) return [];
     const skillName = step.name === 'skillLoad' && typeof step.skillName === 'string'

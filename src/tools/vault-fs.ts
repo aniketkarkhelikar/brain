@@ -3,6 +3,7 @@
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import matter from 'gray-matter';
 
 export class VaultPathError extends Error {
   constructor(message: string) {
@@ -177,6 +178,68 @@ export async function writeVaultFile(
   }
 
   return Buffer.byteLength(text, 'utf8');
+}
+
+async function replaceExistingVaultFile(filePath: string, expected: string, content: string): Promise<void> {
+  const fullPath = await existingFile(filePath);
+  const current = await fs.readFile(fullPath, 'utf8');
+  if (current !== expected) throw new VaultPathError('The note changed while the edit was being prepared. Read it again before retrying.');
+  const stat = await fs.stat(fullPath);
+  const temporaryPath = `${fullPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try {
+    const handle = await fs.open(temporaryPath, 'wx', stat.mode & 0o777);
+    try {
+      await handle.writeFile(content, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    const latest = await fs.readFile(fullPath, 'utf8');
+    const latestStat = await fs.lstat(fullPath);
+    if (latest !== expected || latestStat.isSymbolicLink() || !latestStat.isFile()) {
+      throw new VaultPathError('The note changed while the edit was being prepared. Read it again before retrying.');
+    }
+    await fs.rename(temporaryPath, fullPath);
+  } finally {
+    await fs.rm(temporaryPath, { force: true });
+  }
+}
+
+export async function patchVaultFile(
+  filePath: string,
+  search: string,
+  replacement: string,
+  allowMultiple = false,
+): Promise<{ replacements: number }> {
+  if (!search) throw new VaultPathError('The exact text to replace cannot be empty.');
+  const original = await readVaultFile(filePath);
+  const occurrences = original.split(search).length - 1;
+  if (occurrences === 0) throw new VaultPathError('The exact text was not found in the note.');
+  if (occurrences > 1 && !allowMultiple) throw new VaultPathError(`The exact text appears ${occurrences} times. Use a more specific quote or explicitly allow replacing every match.`);
+  const updated = original.split(search).join(replacement);
+  await replaceExistingVaultFile(filePath, original, updated);
+  return { replacements: occurrences };
+}
+
+export async function metaVaultFile(
+  filePath: string,
+  updates?: Record<string, unknown>,
+): Promise<{ data: Record<string, unknown> }> {
+  if (path.extname(filePath).toLowerCase() !== '.md') throw new VaultPathError('Frontmatter is available only for Markdown notes.');
+  const original = await readVaultFile(filePath);
+  const parsed = matter(original);
+  if (updates) {
+    const nextData = { ...parsed.data } as Record<string, unknown>;
+    for (const [key, value] of Object.entries(updates)) {
+      if (!key.trim() || ['__proto__', 'prototype', 'constructor'].includes(key)) throw new VaultPathError('Frontmatter keys must be ordinary non-empty names.');
+      if (value === null) delete nextData[key];
+      else nextData[key] = value;
+    }
+    const updated = matter.stringify(parsed.content, nextData);
+    await replaceExistingVaultFile(filePath, original, updated);
+    return { data: nextData };
+  }
+  return { data: parsed.data as Record<string, unknown> };
 }
 
 export async function listVaultDirectory(dirPath: string): Promise<Array<{ name: string; type: 'directory' | 'file' }>> {
