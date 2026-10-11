@@ -6,7 +6,7 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "tsx src/ui/server.ts",
-    "test": "tsx --test src/security/sanitizer.test.ts src/utils/file-lock.test.ts src/utils/location.test.ts src/tools/vault-tools.test.ts src/tools/web-tools.test.ts src/skills/loader.test.ts src/reasoning/scratchpad.test.ts src/memory/session.test.ts src/memory/bootstrap.test.ts src/memory/search.test.ts src/heartbeat/ingest.test.ts src/heartbeat/audit.test.ts src/cli.test.ts",
+    "test": "tsx --test src/security/sanitizer.test.ts src/utils/file-lock.test.ts src/utils/location.test.ts src/tools/vault-tools.test.ts src/tools/web-tools.test.ts src/skills/loader.test.ts src/reasoning/scratchpad.test.ts src/reasoning/reasoning-engine.test.ts src/memory/session.test.ts src/memory/bootstrap.test.ts src/memory/search.test.ts src/heartbeat/ingest.test.ts src/heartbeat/audit.test.ts src/cli.test.ts",
 
     "audit": "tsx src/heartbeat/cron.ts --audit",
     "index:vault": "tsx src/memory/index-vault.ts",

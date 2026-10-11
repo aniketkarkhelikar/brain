@@ -80,8 +80,8 @@ export async function performDdgSearch(
   const html = await response.text();
   const results: WebSearchResultItem[] = [];
 
-  const titleRegex = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)<\/a>/g;
-  const snippetRegex = /<a[^>]+class="result__snippet"[^>]*>(.*?)<\/a>/g;
+  const titleRegex = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+  const snippetRegex = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
 
   const titles: Array<{ url: string; title: string }> = [];
   let titleMatch: RegExpExecArray | null;
