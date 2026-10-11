@@ -6,13 +6,14 @@
  */
 
 import { createOllama } from 'ollama-ai-provider-v2';
+import { createOpenAI } from '@ai-sdk/openai';
 import type { EmbeddingModel, LanguageModel } from 'ai';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-// ─── Ollama Provider (→ lab52 GPU server) ───────────────────────
-const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || 'http://172.25.128.20:11434/api';
+// ─── Ollama Provider (→ configured via OLLAMA_BASE_URL) ─────────
+const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434/api';
 export const DEFAULT_EMBEDDING_MODEL = 'all-minilm:l6-v2';
 export const DEFAULT_EMBEDDING_DIMENSIONS = 384;
 
@@ -41,9 +42,15 @@ export function getLanguageModel(): LanguageModel {
       });
     }
     case 'openai': {
-      // Dynamic import would be needed for @ai-sdk/openai
-      // For now, Ollama is the primary provider
-      throw new Error(`OpenAI provider not configured yet. Set OPENAI_API_KEY in .env`);
+      const apiKey = process.env.OPENAI_API_KEY;
+      if (!apiKey) {
+        throw new Error('OPENAI_API_KEY environment variable is required when using the "openai" provider.');
+      }
+      const openai = createOpenAI({
+        apiKey,
+        baseURL: process.env.OPENAI_BASE_URL,
+      });
+      return openai(modelName || 'gpt-4o');
     }
     default:
       throw new Error(`Unknown provider: ${provider}. Use "ollama:model" or "openai:model"`);

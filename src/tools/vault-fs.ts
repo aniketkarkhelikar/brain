@@ -1,8 +1,8 @@
-/** Shared, vault-confined filesystem operations for the agent tools. */
-
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import matter from 'gray-matter';
+import { withFileLock } from '../utils/file-lock.js';
 
 export class VaultPathError extends Error {
   constructor(message: string) {
@@ -165,18 +165,131 @@ export async function writeVaultFile(
     }
   }
 
-  const flags = mode === 'append'
-    ? fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT
-    : fsConstants.O_WRONLY | fsConstants.O_TRUNC | fsConstants.O_CREAT;
-  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
-  const handle = await fs.open(fullPath, flags | noFollow, 0o600);
-  try {
-    await handle.writeFile(text, 'utf8');
-  } finally {
-    await handle.close();
-  }
+  return withFileLock(fullPath, async () => {
+    const flags = mode === 'append'
+      ? fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT
+      : fsConstants.O_WRONLY | fsConstants.O_TRUNC | fsConstants.O_CREAT;
+    const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+    const handle = await fs.open(fullPath, flags | noFollow, 0o600);
+    try {
+      await handle.writeFile(text, 'utf8');
+    } finally {
+      await handle.close();
+    }
+    return Buffer.byteLength(text, 'utf8');
+  });
+}
 
-  return Buffer.byteLength(text, 'utf8');
+const PROTECTED_ROOT_FILES = new Set([
+  'SOUL.md',
+  'USER.md',
+  'MEMORY.md',
+  'BOOTSTRAP.md',
+  'HEARTBEAT.md',
+  'index.md',
+  'log.md',
+]);
+
+function assertNotProtected(filePath: string, operation: string): void {
+  const normalized = filePath.replaceAll('\\', '/').replace(/^\/+/, '');
+  if (PROTECTED_ROOT_FILES.has(normalized)) {
+    throw new VaultPathError(`Cannot ${operation} protected system vault file: "${normalized}".`);
+  }
+}
+
+export async function deleteVaultFile(filePath: string): Promise<void> {
+  assertNotProtected(filePath, 'delete');
+  const fullPath = await existingFile(filePath);
+  await withFileLock(fullPath, async () => {
+    await fs.unlink(fullPath);
+  });
+}
+
+export async function moveVaultFile(sourcePath: string, destinationPath: string): Promise<void> {
+  assertNotProtected(sourcePath, 'move');
+  assertNotProtected(destinationPath, 'overwrite with move');
+  const fullSource = await existingFile(sourcePath);
+  const fullDest = await safeWritePath(destinationPath);
+  await withFileLock(fullSource, async () => {
+    await withFileLock(fullDest, async () => {
+      await fs.rename(fullSource, fullDest);
+    });
+  });
+}
+
+export async function patchVaultFile(
+  filePath: string,
+  search: string,
+  replace: string,
+  allowMultiple = false,
+): Promise<{ replacements: number }> {
+  if (!search) throw new VaultPathError('Search target cannot be empty.');
+  const fullPath = await existingFile(filePath);
+  return withFileLock(fullPath, async () => {
+    const content = await fs.readFile(fullPath, 'utf8');
+    if (!content.includes(search)) {
+      throw new VaultPathError(`Search target not found in "${filePath}".`);
+    }
+
+    let replacements = 0;
+    let newContent: string;
+    if (allowMultiple) {
+      newContent = content.split(search).join(replace);
+      replacements = content.split(search).length - 1;
+    } else {
+      const firstIndex = content.indexOf(search);
+      const secondIndex = content.indexOf(search, firstIndex + search.length);
+      if (secondIndex !== -1) {
+        throw new VaultPathError(
+          `Multiple matches found for patch target in "${filePath}". Provide more surrounding context or set allowMultiple: true.`,
+        );
+      }
+      newContent = content.slice(0, firstIndex) + replace + content.slice(firstIndex + search.length);
+      replacements = 1;
+    }
+
+    const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+    const handle = await fs.open(fullPath, fsConstants.O_WRONLY | fsConstants.O_TRUNC | noFollow, 0o600);
+    try {
+      await handle.writeFile(newContent, 'utf8');
+    } finally {
+      await handle.close();
+    }
+    return { replacements };
+  });
+}
+
+export async function metaVaultFile(
+  filePath: string,
+  updates?: Record<string, unknown>,
+): Promise<{ data: Record<string, unknown> }> {
+  const fullPath = await existingFile(filePath);
+  return withFileLock(fullPath, async () => {
+    const raw = await fs.readFile(fullPath, 'utf8');
+    const parsed = matter(raw);
+
+    if (updates && Object.keys(updates).length > 0) {
+      const mergedData = { ...parsed.data };
+      for (const [key, value] of Object.entries(updates)) {
+        if (value === null || value === undefined) {
+          delete mergedData[key];
+        } else {
+          mergedData[key] = value;
+        }
+      }
+      const updatedMarkdown = matter.stringify(parsed.content, mergedData);
+      const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+      const handle = await fs.open(fullPath, fsConstants.O_WRONLY | fsConstants.O_TRUNC | noFollow, 0o600);
+      try {
+        await handle.writeFile(updatedMarkdown, 'utf8');
+      } finally {
+        await handle.close();
+      }
+      return { data: mergedData };
+    }
+
+    return { data: parsed.data };
+  });
 }
 
 export async function listVaultDirectory(dirPath: string): Promise<Array<{ name: string; type: 'directory' | 'file' }>> {

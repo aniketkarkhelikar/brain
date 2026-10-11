@@ -156,37 +156,38 @@ async function walkMarkdown(root: string, relativeDirectory = ''): Promise<strin
   return files;
 }
 
-export function chunkMarkdown(markdown: string, targetChars = CHUNK_TARGET_CHARS, overlapChars = CHUNK_OVERLAP_CHARS): MarkdownChunk[] {
-  if (!Number.isSafeInteger(targetChars) || targetChars < 32) throw new Error('targetChars must be an integer of at least 32.');
-  if (!Number.isSafeInteger(overlapChars) || overlapChars < 0 || overlapChars >= targetChars) {
-    throw new Error('overlapChars must be a non-negative integer smaller than targetChars.');
-  }
-
-  const text = markdown.replace(/\r\n?/g, '\n').trim();
-  if (!text) return [];
+function slidingWindowChunks(
+  text: string,
+  targetChars: number,
+  overlapChars: number,
+  baseOffset = 0,
+  contextPrefix = '',
+): MarkdownChunk[] {
   const chunks: MarkdownChunk[] = [];
+  const maxContentChars = Math.max(32, targetChars - (contextPrefix ? contextPrefix.length + 2 : 0));
   let start = 0;
 
   while (start < text.length) {
-    let end = Math.min(start + targetChars, text.length);
+    let end = Math.min(start + maxContentChars, text.length);
     if (end < text.length) {
       const paragraphBoundary = text.lastIndexOf('\n\n', end);
-      if (paragraphBoundary > start + targetChars * 0.6) {
+      if (paragraphBoundary > start + maxContentChars * 0.6) {
         end = paragraphBoundary;
       } else {
         const wordBoundary = text.lastIndexOf(' ', end);
-        if (wordBoundary > start + targetChars * 0.6) end = wordBoundary;
+        if (wordBoundary > start + maxContentChars * 0.6) end = wordBoundary;
       }
     }
 
-    const content = text.slice(start, end).trim();
-    if (content) {
-      const contentStart = text.indexOf(content, start);
+    const rawSegment = text.slice(start, end).trim();
+    if (rawSegment) {
+      const contentStart = text.indexOf(rawSegment, start);
+      const chunkBody = contextPrefix ? `${contextPrefix}\n\n${rawSegment}` : rawSegment;
       chunks.push({
         chunkIndex: chunks.length,
-        startOffset: Math.max(0, contentStart),
-        endOffset: Math.max(0, contentStart) + content.length,
-        content,
+        startOffset: baseOffset + Math.max(0, contentStart),
+        endOffset: baseOffset + Math.max(0, contentStart) + rawSegment.length,
+        content: chunkBody,
       });
     }
     if (end >= text.length) break;
@@ -197,6 +198,89 @@ export function chunkMarkdown(markdown: string, targetChars = CHUNK_TARGET_CHARS
     while (start < text.length && /\s/.test(text[start])) start += 1;
   }
   return chunks;
+}
+
+export function chunkMarkdown(
+  markdown: string,
+  targetChars = CHUNK_TARGET_CHARS,
+  overlapChars = CHUNK_OVERLAP_CHARS,
+): MarkdownChunk[] {
+  if (!Number.isSafeInteger(targetChars) || targetChars < 32) throw new Error('targetChars must be an integer of at least 32.');
+  if (!Number.isSafeInteger(overlapChars) || overlapChars < 0 || overlapChars >= targetChars) {
+    throw new Error('overlapChars must be a non-negative integer smaller than targetChars.');
+  }
+
+  const text = markdown.replace(/\r\n?/g, '\n').trim();
+  if (!text) return [];
+
+  // If no markdown headings exist, or targetChars is too small for context prefixing,
+  // use pure sliding window.
+  const hasHeadings = /^#{1,6}\s+/m.test(text);
+  if (!hasHeadings || targetChars < 250) {
+    return slidingWindowChunks(text, targetChars, overlapChars);
+  }
+
+  // Parse structural sections based on markdown headings
+  const headingRegex = /(?:^|\n)(#{1,6})\s+([^\n]+)/g;
+  const sections: Array<{
+    headingLevel: number;
+    title: string;
+    startIndex: number;
+    endIndex: number;
+  }> = [];
+
+  let match: RegExpExecArray | null;
+  while ((match = headingRegex.exec(text)) !== null) {
+    const level = match[1].length;
+    const title = match[2].trim();
+    const headingStart = match.index + (match[0].startsWith('\n') ? 1 : 0);
+    if (sections.length > 0) {
+      sections[sections.length - 1].endIndex = headingStart;
+    }
+    sections.push({
+      headingLevel: level,
+      title,
+      startIndex: headingStart,
+      endIndex: text.length,
+    });
+  }
+
+  const chunks: MarkdownChunk[] = [];
+  if (sections.length > 0 && sections[0].startIndex > 0) {
+    const preamble = text.slice(0, sections[0].startIndex).trim();
+    if (preamble) {
+      chunks.push(...slidingWindowChunks(preamble, targetChars, overlapChars, 0));
+    }
+  }
+
+  const headingStack: Array<{ level: number; title: string }> = [];
+
+  for (const section of sections) {
+    while (headingStack.length > 0 && headingStack[headingStack.length - 1].level >= section.headingLevel) {
+      headingStack.pop();
+    }
+    headingStack.push({ level: section.headingLevel, title: section.title });
+
+    const breadcrumb = `[Context: ${headingStack.map((h) => h.title).join(' > ')}]`;
+    const sectionBody = text.slice(section.startIndex, section.endIndex).trim();
+    if (!sectionBody) continue;
+
+    const sectionChunks = slidingWindowChunks(
+      sectionBody,
+      targetChars,
+      overlapChars,
+      section.startIndex,
+      breadcrumb,
+    );
+    for (const chunk of sectionChunks) {
+      chunks.push({
+        ...chunk,
+        chunkIndex: chunks.length,
+      });
+    }
+  }
+
+  return chunks.length > 0 ? chunks : slidingWindowChunks(text, targetChars, overlapChars);
 }
 
 type EmbeddedChunk = { chunk: MarkdownChunk; embedding: number[] };

@@ -2,7 +2,7 @@
 
 _This file triggers an interactive onboarding interview on first run. It self-deletes after completion._
 
-## Status: PENDING
+## Status: IN_PROGRESS (2/12)
 
 ## Onboarding Questions
 

@@ -2,6 +2,7 @@ import type { ModelMessage } from 'ai';
 import { runBootstrapIfNeeded } from './memory/bootstrap.js';
 import { compactHistory, DEFAULT_SESSION_ID, SessionStore } from './memory/session.js';
 import { ingestInbox, listInboxReviewQueue } from './heartbeat/ingest.js';
+import { runSecondBrainAudit } from './heartbeat/audit.js';
 
 export type CliIO = {
   ask: (prompt: string) => Promise<string>;
@@ -39,7 +40,7 @@ export async function runCli(runtime: CliRuntime): Promise<void> {
       return;
     }
     if (prompt === '/help') {
-      write('Commands: /new [name], /use <id>, /sessions, /review, /reset, /exit\n\n');
+      write('Commands: /new [name], /use <id>, /sessions, /review, /audit, /reset, /exit\n\n');
       continue;
     }
     if (prompt === '/review') {
@@ -77,6 +78,39 @@ export async function runCli(runtime: CliRuntime): Promise<void> {
         else write(`${item.decision}: ${item.source}${item.targetPaths?.length ? ` → ${item.targetPaths.join(', ')}` : item.targetPath ? ` → ${item.targetPath}` : ''}${item.message ? ` (${item.message})` : ''}\n\n`);
       } catch (error) {
         write(`Review failed: ${error instanceof Error ? error.message : String(error)}\n\n`);
+      }
+      continue;
+    }
+    if (prompt === '/audit') {
+      try {
+        write('Running Second Brain Audit (Cole Medin architecture)...\n');
+        const report = await runSecondBrainAudit(vaultPath);
+        write(`\nAudit Report (${report.auditedAt}):\n`);
+        write(`- Notes Scanned: ${report.filesScanned}\n`);
+        write(`- State Claims: ${report.summary.totalClaims} (${report.summary.confirmed} confirmed, ${report.summary.contradicted} contradicted, ${report.summary.unsupported} unsupported)\n`);
+        write(`- Broken Wikilinks: ${report.summary.brokenLinks}\n`);
+        write(`- Orphan Notes: ${report.summary.orphans}\n`);
+        if (report.summary.contradicted > 0) {
+          write('\nContradicted Claims (Context Rot):\n');
+          for (const claim of report.claims.filter((c) => c.status === 'contradicted')) {
+            write(`  - [${claim.sourceFile}] "${claim.claim}" → ${claim.evidence ?? 'Contradicted by newer notes'}\n`);
+          }
+        }
+        if (report.brokenLinks.length > 0) {
+          write('\nBroken Links:\n');
+          for (const link of report.brokenLinks) {
+            write(`  - [${link.sourceFile}] → [[${link.target}]]\n`);
+          }
+        }
+        if (report.orphanNotes.length > 0) {
+          write(`\nOrphan Notes (${report.orphanNotes.length}):\n`);
+          for (const orphan of report.orphanNotes.slice(0, 5)) {
+            write(`  - ${orphan}\n`);
+          }
+        }
+        write('\nAudit summary recorded to log.md and daily notes.\n\n');
+      } catch (error) {
+        write(`Audit failed: ${error instanceof Error ? error.message : String(error)}\n\n`);
       }
       continue;
     }

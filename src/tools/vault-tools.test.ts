@@ -12,6 +12,10 @@ import { createVaultSearchTool, vaultSearch } from './vault-search.js';
 import { readVaultFileIfSmall, searchVaultFiles } from './vault-fs.js';
 import { vaultWrite } from './vault-write.js';
 import { vaultCatalog } from './vault-catalog.js';
+import { vaultDelete } from './vault-delete.js';
+import { vaultMove } from './vault-move.js';
+import { vaultPatch } from './vault-patch.js';
+import { vaultMeta } from './vault-meta.js';
 
 let tempRoot = '';
 let vaultRoot = '';
@@ -87,7 +91,24 @@ describe('Phase 3 vault tools', () => {
   });
 
   it('registers the vault inventory route and loads the configured vault context', async () => {
-    assert.deepEqual(Object.keys(allTools).sort(), ['vaultCatalog', 'vaultList', 'vaultRead', 'vaultSearch', 'vaultWrite'].sort());
+    assert.deepEqual(
+      Object.keys(allTools).sort(),
+      [
+        'vaultCatalog',
+        'vaultList',
+        'vaultRead',
+        'vaultSearch',
+        'vaultWrite',
+        'vaultDelete',
+        'vaultMove',
+        'vaultPatch',
+        'vaultMeta',
+        'webSearch',
+        'webRead',
+        'skillLoad',
+      ].sort(),
+    );
+
     const context = await loadVaultContext();
     assert.match(context, /=== SOUL\.md === \(not found\)/);
     assert.match(context, /=== MEMORY\.md ===/);
@@ -216,5 +237,98 @@ describe('Phase 3 vault tools', () => {
     assert.equal((searchSchema.parse({ query: 'wiki' }) as { maxResults: number }).maxResults, 10);
     assert.equal((writeSchema.parse({ filePath: 'new.md', content: 'ok' }) as { mode: string }).mode, 'write');
     assert.equal(writeSchema.safeParse({ filePath: 'new.md', content: 'x'.repeat(5_000_001) }).success, false);
+  });
+
+  it('deletes allowed vault files and protects core files', async () => {
+    await fs.writeFile(path.join(vaultRoot, 'Work', 'projects', 'trash.md'), '# To delete\n');
+    const deleteResult = await runTool(vaultDelete, { filePath: 'Work/projects/trash.md' }) as { success: boolean };
+    assert.equal(deleteResult.success, true);
+    const exists = await fs.access(path.join(vaultRoot, 'Work', 'projects', 'trash.md')).then(() => true).catch(() => false);
+    assert.equal(exists, false);
+
+    // Should refuse to delete MEMORY.md
+    const protectedResult = await runTool(vaultDelete, { filePath: 'MEMORY.md' }) as { success: boolean; error?: string };
+    assert.equal(protectedResult.success, false);
+    assert.match(protectedResult.error ?? '', /Cannot delete protected system vault file/);
+  });
+
+  it('moves and renames files within the vault safely', async () => {
+    await fs.writeFile(path.join(vaultRoot, 'Work', 'projects', 'v1.md'), '# Project v1\n');
+    const moveResult = await runTool(vaultMove, {
+      sourcePath: 'Work/projects/v1.md',
+      destinationPath: 'Work/projects/v2.md',
+    }) as { success: boolean };
+    assert.equal(moveResult.success, true);
+
+    const v1Exists = await fs.access(path.join(vaultRoot, 'Work', 'projects', 'v1.md')).then(() => true).catch(() => false);
+    assert.equal(v1Exists, false);
+    const v2Content = await fs.readFile(path.join(vaultRoot, 'Work', 'projects', 'v2.md'), 'utf8');
+    assert.match(v2Content, /# Project v1/);
+
+    // Refuses moving protected system files
+    const protectedMove = await runTool(vaultMove, {
+      sourcePath: 'MEMORY.md',
+      destinationPath: 'Work/MEMORY_COPY.md',
+    }) as { success: boolean; error?: string };
+    assert.equal(protectedMove.success, false);
+    assert.match(protectedMove.error ?? '', /Cannot move protected/);
+  });
+
+  it('patches files with targeted search and replace', async () => {
+    const patchPath = 'Work/projects/launch.md';
+    const patchResult = await runTool(vaultPatch, {
+      filePath: patchPath,
+      search: 'uses a structured wiki',
+      replace: 'uses an autonomous second brain',
+    }) as { success: boolean; replacements?: number };
+    assert.equal(patchResult.success, true);
+    assert.equal(patchResult.replacements, 1);
+
+    const patched = await fs.readFile(path.join(vaultRoot, patchPath), 'utf8');
+    assert.match(patched, /uses an autonomous second brain/);
+
+    // Error on missing target
+    const missingTarget = await runTool(vaultPatch, {
+      filePath: patchPath,
+      search: 'nonexistent text to replace',
+      replace: 'foo',
+    }) as { success: boolean; error?: string };
+    assert.equal(missingTarget.success, false);
+    assert.match(missingTarget.error ?? '', /Search target not found/);
+  });
+
+  it('reads and updates YAML frontmatter metadata', async () => {
+    const metaPath = 'Work/projects/meta-test.md';
+    await fs.writeFile(
+      path.join(vaultRoot, metaPath),
+      '---\ntitle: Meta Test\nstatus: active\ntags: [ai, brain]\n---\n# Body here\n',
+      'utf8',
+    );
+
+    // Read metadata
+    const readMeta = await runTool(vaultMeta, { filePath: metaPath }) as {
+      success: boolean;
+      metadata: Record<string, unknown>;
+    };
+    assert.equal(readMeta.success, true);
+    assert.equal(readMeta.metadata.status, 'active');
+    assert.deepEqual(readMeta.metadata.tags, ['ai', 'brain']);
+
+    // Update metadata
+    const updateMeta = await runTool(vaultMeta, {
+      filePath: metaPath,
+      updates: { status: 'completed', priority: 'high' },
+    }) as {
+      success: boolean;
+      metadata: Record<string, unknown>;
+    };
+    assert.equal(updateMeta.success, true);
+    assert.equal(updateMeta.metadata.status, 'completed');
+    assert.equal(updateMeta.metadata.priority, 'high');
+
+    const fileContent = await fs.readFile(path.join(vaultRoot, metaPath), 'utf8');
+    assert.match(fileContent, /status: completed/);
+    assert.match(fileContent, /priority: high/);
+    assert.match(fileContent, /# Body here/);
   });
 });

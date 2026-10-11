@@ -264,4 +264,25 @@ describe('Phase 5 hybrid vault search and indexing', () => {
     assert.ok(stats.chunksIndexed > 1);
     assert.ok(embeddingCalls > 1);
   });
+
+  it('preserves hierarchical heading breadcrumbs in structured markdown notes', () => {
+    const markdown = [
+      '# Vehicle Fleet',
+      '',
+      'Introductory notes.',
+      '',
+      '## Vintage Cars',
+      '',
+      '### Maintenance Schedule',
+      '',
+      'Annual carburetor tuning and brake fluid flush.',
+    ].join('\n');
+
+    const chunks = chunkMarkdown(markdown, 500, 50);
+    assert.ok(chunks.length >= 2);
+    const maintenanceChunk = chunks.find((c) => c.content.includes('carburetor'));
+    assert.ok(maintenanceChunk, 'Should find maintenance chunk');
+    assert.match(maintenanceChunk.content, /\[Context: Vehicle Fleet > Vintage Cars > Maintenance Schedule\]/);
+    assert.match(maintenanceChunk.content, /Annual carburetor tuning/);
+  });
 });

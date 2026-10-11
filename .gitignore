@@ -8,3 +8,5 @@ vault/Archive/*
 !vault/Archive/.gitkeep
 *.db
 *.sqlite
+*.lock
+.vault-lock*
