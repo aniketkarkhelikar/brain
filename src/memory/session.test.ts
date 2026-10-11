@@ -91,6 +91,31 @@ describe('Phase 8 SQLite chat sessions', () => {
     assert.throws(() => compactHistory(messages, 1), /at least 2/);
   });
 
+  it('sanitizes severed turns so dangling tool calls never cause MissingToolResultsError', () => {
+    const messages: ModelMessage[] = [
+      { role: 'user', content: 'First message' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Looking up notes...' },
+          { type: 'tool-call', toolCallId: 'call-severed', toolName: 'vaultCatalog', args: {} },
+        ],
+      } as ModelMessage,
+      // The tool-result for call-severed was severed by a slice
+      { role: 'user', content: 'Second message' },
+      { role: 'assistant', content: 'Second reply' },
+    ];
+
+    const sanitized = compactHistory(messages, 16);
+    assert.equal(sanitized.length, 4);
+    assert.equal(sanitized[0].role, 'user');
+    assert.equal(sanitized[1].role, 'assistant');
+    // Ensure the tool-call part was stripped and only text remains
+    assert.equal(sanitized[1].content, 'Looking up notes...');
+    assert.equal(sanitized[2].role, 'user');
+    assert.equal(sanitized[3].role, 'assistant');
+  });
+
   it('rejects invalid user input and refuses to load malformed persisted history', () => {
     const store = new SessionStore(dbPath);
     store.ensureSession('corrupt');

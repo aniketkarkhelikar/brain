@@ -23,6 +23,62 @@ export type SessionInfo = {
   messageCount: number;
 };
 
+/**
+ * Ensures message history conforms to language model protocol:
+ * - Every assistant message with tool-calls MUST be immediately followed by matching tool-results.
+ * - Dangling tool-calls (whose results were severed by compaction) have their tool-call parts stripped.
+ * - Orphaned tool-results (whose calls were severed) are safely omitted.
+ */
+export function sanitizeModelMessages(messages: ModelMessage[]): ModelMessage[] {
+  const result: ModelMessage[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+
+    if (msg.role === 'assistant') {
+      if (Array.isArray(msg.content)) {
+        const toolCalls = msg.content.filter((p: any) => p && typeof p === 'object' && p.type === 'tool-call');
+        if (toolCalls.length > 0) {
+          const nextMsg = messages[i + 1];
+          const hasMatchingToolResults =
+            nextMsg &&
+            nextMsg.role === 'tool' &&
+            Array.isArray(nextMsg.content) &&
+            toolCalls.every((tc: any) =>
+              nextMsg.content.some((tr: any) => tr && typeof tr === 'object' && tr.type === 'tool-result' && tr.toolCallId === tc.toolCallId)
+            );
+
+          if (hasMatchingToolResults) {
+            result.push(msg);
+            result.push(nextMsg);
+            i++; // skip nextMsg since we included it
+            continue;
+          } else {
+            // Dangling tool calls without results: preserve only text parts
+            const textParts = msg.content
+              .filter((p: any) => p && typeof p === 'object' && p.type === 'text' && typeof p.text === 'string' && p.text.trim())
+              .map((p: any) => p.text)
+              .join('\n');
+
+            if (textParts.trim()) {
+              result.push({ role: 'assistant', content: textParts });
+            }
+            continue;
+          }
+        }
+      }
+      result.push(msg);
+    } else if (msg.role === 'tool') {
+      // Orphaned tool result without preceding tool-call assistant message
+      continue;
+    } else {
+      result.push(msg);
+    }
+  }
+
+  return result;
+}
+
 /** Keep the opening context and the most recent messages sent back to the model. */
 export function compactHistory(
   messages: ModelMessage[],
@@ -35,10 +91,16 @@ export function compactHistory(
   if (!Number.isSafeInteger(openingMessages) || openingMessages < 0 || openingMessages >= maxMessages) {
     throw new Error('openingMessages must be a non-negative integer smaller than maxMessages.');
   }
-  if (messages.length <= maxMessages) return messages;
 
-  const recentCount = maxMessages - openingMessages;
-  return [...messages.slice(0, openingMessages), ...messages.slice(-recentCount)];
+  let selected: ModelMessage[];
+  if (messages.length <= maxMessages) {
+    selected = messages;
+  } else {
+    const recentCount = maxMessages - openingMessages;
+    selected = [...messages.slice(0, openingMessages), ...messages.slice(-recentCount)];
+  }
+
+  return sanitizeModelMessages(selected);
 }
 
 function parseMessages(serialized: string, sessionId: string): ModelMessage[] {
