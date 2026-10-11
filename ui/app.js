@@ -87,6 +87,12 @@ function relativeDate(date) {
   const days = Math.floor((Date.now() - new Date(date).getTime()) / 86400000);
   return days <= 0 ? 'Today' : days === 1 ? 'Yesterday' : `${days} days ago`;
 }
+function friendlySchedule(expression, kind) {
+  if (kind === 'inbox' && expression === '*/30 8-22 * * *') return 'every 30 minutes, 08:00–22:30';
+  if (kind === 'brain' && expression === '30 3 * * *') return 'daily at 03:30';
+  return `custom schedule (${expression})`;
+}
+function countLabel(count, singular, plural = `${singular}s`) { return `${count} ${count === 1 ? singular : plural}`; }
 const findingGuidance = {
   'broken-link': ['This note links to a target that does not exist in the vault.', 'Check for a renamed or moved note. Update the link to an exact existing path, or create a note only if the missing topic is real.'],
   'ambiguous-link': ['This link matches multiple notes with the same name.', 'Use a full relative path in the wikilink so it points to one specific note.'],
@@ -103,6 +109,31 @@ function renderAudit(report) {
     const [meaning, next] = findingGuidance[finding.kind] || ['The linter found a structural pattern that may need attention.', 'The background checker recorded the finding for this vault review.'];
     return `<article class="finding-card ${finding.severity}"><div class="finding-symbol" aria-hidden="true">${finding.severity === 'error' ? '!' : '·'}</div><div class="finding-content"><div class="finding-title-row"><strong>${esc(finding.file)}</strong><span class="finding-badge ${finding.severity}">${esc(finding.severity)}</span></div><p>${esc(meaning)}</p><small class="finding-evidence">${esc(finding.detail)}</small><div class="finding-next"><b>Checker guidance</b><span>${esc(next)}</span></div></div></article>`;
   }).join('');
+}
+function renderMemoryAudit(report) {
+  const panel = $('#memory-audit-findings'); if (!panel) return;
+  const coverage = $('#memory-audit-coverage');
+  if (!report?.auditedAt) {
+    setText('#memory-audit-last-run', 'No run yet');
+    if (coverage) coverage.textContent = 'The first audit checks always-loaded memory files and notes with a Current State section.';
+    panel.innerHTML = '<div class="empty-state">No memory review yet. Run Brain checks to compare current claims with evidence already in your vault.</div>';
+    return;
+  }
+  const counts = report.summary || {};
+  setText('#memory-audit-last-run', `Audited ${new Date(report.auditedAt).toLocaleString()}`);
+  if (coverage) coverage.textContent = `${report.filesAudited} of ${report.candidateFiles} candidate notes checked · ${countLabel(report.claimsChecked, 'claim')} · ${countLabel(report.coverage?.remainingFiles || 0, 'note')} remaining. ${report.coverage?.scope || ''}${report.errors?.length ? ` ${countLabel(report.errors.length, 'note')} could not be checked.` : ''}`;
+  if (!report.findings?.length) {
+    panel.innerHTML = report.coverage?.complete && !report.errors?.length
+      ? '<div class="audit-clear"><span>✓</span><div><strong>No contradicted or unsupported current claims found</strong><small>Confirmed claims are counted in the report. Historical and event notes were left alone.</small></div></div>'
+      : '<div class="empty-state">No findings in this batch. The coverage line above shows what remains to check.</div>';
+    if (report.errors?.length) panel.innerHTML += `<div class="memory-audit-errors"><strong>Could not check ${report.errors.length} notes</strong>${report.errors.map((error) => `<small>${esc(error)}</small>`).join('')}</div>`;
+    return;
+  }
+  panel.innerHTML = report.findings.map((finding) => {
+    const status = finding.action === 'auto-fixed' ? 'Auto-corrected' : finding.status === 'unsupported' ? 'Uncorroborated · review' : finding.status === 'unclear' ? 'Unclear · review' : 'Contradicted · review';
+    return `<article class="memory-finding ${finding.action === 'auto-fixed' ? 'resolved' : 'pending'}"><div class="memory-finding-head"><strong>${esc(finding.file)}</strong><span class="finding-badge ${finding.action === 'auto-fixed' ? 'warning' : 'error'}">${esc(status)}</span></div><blockquote>${esc(finding.claim)}</blockquote><p>${esc(finding.rationale)}</p>${finding.evidencePath && finding.evidenceQuote ? `<div class="memory-evidence"><small>Evidence · ${esc(finding.evidencePath)}${finding.evidenceDate ? ` · ${esc(finding.evidenceDate)}` : ''}</small><blockquote>${esc(finding.evidenceQuote)}</blockquote></div>` : ''}${finding.autoFixReason ? `<small class="memory-audit-errors">Correction held: ${esc(finding.autoFixReason)}</small>` : ''}<small>Confidence ${Math.round((finding.confidence || 0) * 100)}% · ${esc(finding.id)}</small></article>`;
+  }).join('');
+  if (report.errors?.length) panel.innerHTML += `<div class="memory-audit-errors"><strong>Could not check ${report.errors.length} notes</strong>${report.errors.map((error) => `<small>${esc(error)}</small>`).join('')}</div>`;
 }
 function switchView(view) {
   state.view = view; $$('.view').forEach((item) => item.classList.toggle('active', item.id === `view-${view}`));
@@ -135,7 +166,7 @@ function renderSources(node, sources = []) {
   if (node.parentElement?.lastElementChild === node) $('#conversation-scroll').scrollTop = $('#conversation-scroll').scrollHeight;
 }
 function traceLabel(step) {
-  const labels = { vaultSearch: 'Searched your vault', vaultRead: 'Read a vault note', vaultList: 'Checked vault folders', vaultCatalog: 'Checked the vault index', webSearch: 'Searched the web', webRead: 'Opened a web page', vaultWrite: 'Updated a vault note' };
+  const labels = { vaultSearch: 'Searched your vault', vaultRead: 'Read a vault note', vaultList: 'Checked vault folders', vaultCatalog: 'Checked the vault index', webSearch: 'Searched the web', webRead: 'Opened a web page', vaultWrite: 'Updated a vault note', memoryAudit: 'Audited current memory against vault evidence' };
   if (step.name === 'skillLoad') return `Loaded skill: ${(step.skillName || 'matched skill').replaceAll('-', ' ')}`;
   return labels[step.name] || 'Worked through the request';
 }
@@ -143,7 +174,7 @@ function renderTrace(node, trace = []) {
   let section = node.querySelector('.message-trace');
   const wasOpen = section?.open || false;
   if (section) section.remove();
-  const steps = trace.filter((step) => step && ['vaultSearch', 'vaultRead', 'vaultList', 'vaultCatalog', 'webSearch', 'webRead', 'skillLoad', 'vaultWrite'].includes(step.name)).slice(0, 32);
+  const steps = trace.filter((step) => step && ['vaultSearch', 'vaultRead', 'vaultList', 'vaultCatalog', 'webSearch', 'webRead', 'skillLoad', 'vaultWrite', 'memoryAudit'].includes(step.name)).slice(0, 32);
   if (!steps.length) return;
   section = document.createElement('details'); section.className = 'message-trace';
   section.open = wasOpen;
@@ -220,11 +251,15 @@ async function loadOverview() {
     const info = await api('/api/overview'); state.overview = info; state.recentRuns = info.recentRuns || []; state.files = await api('/api/brain/files');
     const onboarding = await api('/api/onboarding'); if (onboarding.required && (!state.onboarding || state.onboarding.index !== onboarding.index)) showOnboarding(onboarding);
     setText('#file-count', info.fileCount); setText('#review-count', info.reviewCount); setText('#composer-model', info.model.replace(/^ollama:/, '') + ' · Local');
-    setText('#settings-model', info.model); setText('#settings-vault', info.vaultPath); setText('#settings-schedule', info.schedule + ' · ' + info.timezone);
-    $('#settings-audit').textContent = info.audit?.auditedAt
-      ? `${info.audit.filesScanned} notes checked · ${info.audit.summary.errors} errors · ${info.audit.summary.warnings} warnings`
-      : `Not run yet · scheduled ${info.auditSchedule}`;
+    setText('#settings-model', info.model); setText('#settings-vault', info.vaultPath);
     renderAudit(info.audit);
+    renderMemoryAudit(info.memoryAudit);
+    const lastCheckAt = [info.audit?.auditedAt, info.memoryAudit?.auditedAt].filter(Boolean).sort().at(-1);
+    const checkStatus = lastCheckAt
+      ? `Last checked ${new Date(lastCheckAt).toLocaleString()} · ${countLabel(info.audit?.summary?.errors || 0, 'structure error')} · ${countLabel(info.audit?.summary?.warnings || 0, 'warning')} · ${countLabel(info.memoryAudit?.summary?.autoFixed || 0, 'memory update')} · ${countLabel(info.memoryAudit?.summary?.needsReview || 0, 'item', 'items')} to review · ${friendlySchedule(info.brainCheckSchedule, 'brain')}`
+      : `Structure + AI memory · ${friendlySchedule(info.brainCheckSchedule, 'brain')} (${info.timezone})`;
+    setText('#settings-check-status', checkStatus);
+    setText('#settings-watcher', info.watcherReady ? 'Watching nested Markdown changes on this device' : 'Starting local Markdown watcher…');
     if (info.lastActivity) handleActivity(info.lastActivity, false);
     if (state.view === 'agents') renderAgentStatus();
   } catch (error) { $('#connection-label').textContent = 'Local · Offline'; toast('Could not reach your brain', error.message, 'error'); }
@@ -248,11 +283,12 @@ $('#onboarding-form').addEventListener('submit', async (event) => {
 });
 function handleActivity(event, notify = true) {
   if (!event) return;
-  const labels = { 'ingest-start': ['Processing inbox', 'The local brain is sorting new notes.'], 'ingest-done': ['Inbox processed', event.message], 'heartbeat-start': ['Brain check started', 'Reviewing your local notes and inbox.'], 'heartbeat-done': ['Brain check complete', event.message], 'audit-start': ['Vault lint started', 'Checking links, empty notes, and Inbox state.'], 'audit-done': ['Vault lint complete', event.message], thinking: ['Assistant is thinking', 'Searching your knowledge and preparing a response.'], error: ['Something needs attention', event.message], assistant: ['Assistant responded', event.message] };
+  const labels = { 'ingest-start': ['Processing Inbox', 'The local brain is sorting new notes.'], 'ingest-done': ['Inbox processed', event.message], 'heartbeat-start': ['Automatic Inbox check started', 'The local background processor is checking for new Inbox notes.'], 'heartbeat-done': ['Automatic Inbox check complete', event.message], 'brain-check-start': ['Brain checks started', 'Checking vault structure and current memory.'], 'brain-check-done': ['Brain checks complete', event.message], 'vault-watch-start': ['Vault change detected', event.message], 'vault-watch-done': ['Vault updated', event.message], 'vault-watch-ready': ['Vault watch ready', event.message], thinking: ['Assistant is thinking', 'Searching your knowledge and preparing a response.'], error: ['Something needs attention', event.message], assistant: ['Assistant responded', event.message] };
   const [title, text] = labels[event.type] || ['Brain activity', event.message || 'Background work updated.'];
   const eventKey = `${event.type}:${event.at}`;
   state.lastActivityKey = eventKey;
-  if (notify && ['heartbeat-start','heartbeat-done','ingest-start','ingest-done','audit-start','audit-done','error'].includes(event.type)) { state.events.unshift({ title, text, time: new Date(event.at) }); state.events = state.events.slice(0, 10); if (state.view === 'agents') loadAgents(); }
+  if (notify && ['heartbeat-start','heartbeat-done','ingest-start','ingest-done','brain-check-start','brain-check-done','vault-watch-start','vault-watch-done','error'].includes(event.type)) { state.events.unshift({ title, text, time: new Date(event.at) }); state.events = state.events.slice(0, 10); if (state.view === 'agents') loadAgents(); }
+  if (notify && event.type === 'vault-watch-done' && state.view === 'inbox') loadReview();
   if (notify && event.type === 'error') toast(title, text, 'error');
   if (event.stats) setText('#review-count', event.stats.needsReview || 0);
 }
@@ -278,9 +314,9 @@ async function loadTasks() {
 }
 function renderAgentStatus() {
   const info = state.overview; if (!info) return;
-  $('#agent-schedule-text').textContent = info.schedule; $('#agent-timezone-text').textContent = info.timezone;
-  $('#agent-status-title').textContent = info.busy ? 'Your brain is working right now' : 'Automatic check is scheduled';
-  $('#agent-status-copy').textContent = info.busy ? 'The local agent is sorting notes or answering a question.' : 'The agent checks your local Inbox and updates its daily log during active hours.';
+  $('#agent-schedule-text').textContent = friendlySchedule(info.schedule, 'inbox'); setText('#agent-brain-schedule-text', friendlySchedule(info.brainCheckSchedule, 'brain')); $('#agent-timezone-text').textContent = info.timezone;
+  $('#agent-status-title').textContent = info.busy ? 'Your brain is working right now' : 'Automatic work is scheduled';
+  $('#agent-status-copy').textContent = info.busy ? 'The local agent is processing Inbox notes, checking memory, or answering a question.' : `Markdown changes are watched locally · Inbox processing runs ${friendlySchedule(info.schedule, 'inbox')} · brain checks run ${friendlySchedule(info.brainCheckSchedule, 'brain')} (${info.timezone}).`;
   const liveEvents = state.events.slice(0, 8).map((item) => `<div class="agent-event"><span class="activity-marker"></span><div><strong>${esc(item.title)}</strong><small>${esc(item.text)}</small></div><time>${new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(item.time)}</time></div>`);
   const loggedRuns = state.recentRuns.map((line) => `<div class="agent-event logged-run"><span class="activity-marker"></span><div><strong>From the append-only vault log</strong><small>${esc(line.replace(/^-\s*/, ''))}</small></div></div>`);
   $('#agent-activity').innerHTML = [...liveEvents, ...loggedRuns].length ? [...liveEvents, ...loggedRuns].slice(0, 10).join('') : '<div class="empty-state">No runs recorded yet. The schedule is active.</div>';
@@ -304,8 +340,7 @@ async function loadReview() {
 }
 async function retryReview(source) { const input = $(`.review-guidance[data-source="${CSS.escape(source)}"]`); const guidance = input?.value.trim(); if (!guidance) { toast('A little guidance needed', 'Add a destination path or short correction first.', 'error'); input?.focus(); return; } const button = $(`.retry-review[data-source="${CSS.escape(source)}"]`); button.disabled = true; button.textContent = 'Working…'; try { await api('/api/review/retry', { method: 'POST', body: JSON.stringify({ source, guidance }) }); toast('Note resolved', 'The inbox compiler has handled your guidance.'); loadReview(); loadOverview(); } catch (error) { toast('Could not resolve note', error.message, 'error'); button.disabled = false; button.textContent = 'Resolve →'; } }
 async function runIngest(button = $('#ingest-now')) { button.disabled = true; const old = button.textContent; button.textContent = 'Processing…'; try { const stats = await api('/api/ingest', { method: 'POST', body: '{}' }); toast('Inbox processed', `${stats.created} created · ${stats.updated} updated · ${stats.needsReview} to review`); await loadOverview(); await loadReview(); } catch (error) { toast('Ingestion paused', error.message, 'error'); } finally { button.disabled = false; button.textContent = old; } }
-async function runHeartbeat(button) { button.disabled = true; const old = button.textContent; button.textContent = 'Checking…'; try { const result = await api('/api/heartbeat', { method: 'POST', body: '{}' }); const stats = result.ingestion; toast('Brain check complete', `${stats.scanned} notes checked · ${stats.created} created · ${stats.needsReview} to review`); await loadOverview(); } catch (error) { toast('Brain check couldn’t finish', error.message, 'error'); } finally { button.disabled = false; button.textContent = old; } }
-async function runVaultAudit(button) { button.disabled = true; const old = button.textContent; button.textContent = 'Linting…'; try { const report = await api('/api/audit', { method: 'POST', body: '{}' }); toast('Vault lint complete', `${report.filesScanned} notes · ${report.summary.errors} errors · ${report.summary.warnings} warnings`); await loadOverview(); } catch (error) { toast('Vault lint failed', error.message, 'error'); } finally { button.disabled = false; button.textContent = old; } }
+async function runBrainCheck(button = $('#brain-check-run')) { button.disabled = true; const old = button.textContent; button.textContent = 'Checking…'; try { const result = await api('/api/brain-check', { method: 'POST', body: '{}' }); renderAudit(result.audit); renderMemoryAudit(result.memoryAudit); const structure = result.audit.summary; const memory = result.memoryAudit.summary; toast('Brain checks complete', `${result.audit.filesScanned} notes · ${structure.errors} structural errors · ${result.memoryAudit.claimsChecked} memory claims · ${memory.autoFixed} corrected · ${memory.needsReview} to review`); await loadOverview(); } catch (error) { toast('Brain checks couldn’t finish', error.message, 'error'); } finally { button.disabled = false; button.textContent = old; } }
 async function newSession() { try { const session = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ name: 'New conversation' }) }); state.sessions.unshift(session); await loadSession(session.id); await refreshSessions(); $('#chat-title').textContent = 'A little more room to think.'; switchView('assistant'); $('#prompt').focus(); } catch (error) { toast('Could not start conversation', error.message, 'error'); } }
 
 document.addEventListener('click', async (event) => {
@@ -321,9 +356,7 @@ $('#history-close').addEventListener('click', () => $('#history-dialog').close()
 $('#send').addEventListener('click', () => sendMessage());
 $('#prompt').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(); } });
 $('#prompt').addEventListener('input', (event) => { event.target.style.height = 'auto'; event.target.style.height = `${Math.min(event.target.scrollHeight,160)}px`; });
-$('#settings-run').addEventListener('click', (event) => runHeartbeat(event.currentTarget)); $('#ingest-now').addEventListener('click', (event) => runIngest(event.currentTarget));
-$('#audit-run').addEventListener('click', (event) => runVaultAudit(event.currentTarget));
-$('#agent-run').addEventListener('click', (event) => runHeartbeat(event.currentTarget)); $('#agent-ingest').addEventListener('click', () => runIngest($('#agent-ingest')));
+$('#brain-check-run').addEventListener('click', (event) => runBrainCheck(event.currentTarget)); $('#settings-ingest-run').addEventListener('click', (event) => runIngest(event.currentTarget)); $('#ingest-now').addEventListener('click', (event) => runIngest(event.currentTarget));
 $$('[data-brain-tab]').forEach((button) => button.addEventListener('click', () => { state.brainTab = button.dataset.brainTab; $$('[data-brain-tab]').forEach((item) => item.classList.toggle('selected', item === button)); loadBrain(); }));
 let searchTimer; $('#brain-search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadBrain, 350); });
 $('#modal').addEventListener('click', (event) => { if (event.target.id === 'modal' || event.target.closest('.modal-close')) $('#modal').hidden = true; });

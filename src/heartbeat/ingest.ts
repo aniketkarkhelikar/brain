@@ -211,8 +211,36 @@ function occurrenceCount(text: string, value: string): number {
   return value ? text.split(value).length - 1 : 0;
 }
 
+function currentStateOccurrences(content: string, value: string): number {
+  const lines = content.split(/\r?\n/);
+  let inCurrentState = false;
+  let count = 0;
+  for (const line of lines) {
+    const heading = line.match(/^#{1,3}\s+(.+?)\s*#*\s*$/)?.[1]?.trim().toLocaleLowerCase();
+    if (heading) {
+      inCurrentState = /^(?:current state|current status|current|now)$/.test(heading);
+      continue;
+    }
+    if (inCurrentState) count += occurrenceCount(line, value);
+  }
+  return count;
+}
+
 function markSupersededClaim(content: string, oldText: string, date: string): string {
-  const index = content.indexOf(oldText);
+  const lines = content.split(/\r?\n/);
+  let inCurrentState = false;
+  let offset = 0;
+  let index = -1;
+  for (const line of lines) {
+    const heading = line.match(/^#{1,3}\s+(.+?)\s*#*\s*$/)?.[1]?.trim().toLocaleLowerCase();
+    if (heading) {
+      inCurrentState = /^(?:current state|current status|current|now)$/.test(heading);
+      offset += line.length + 1;
+      continue;
+    }
+    if (inCurrentState && line.includes(oldText)) { index = offset + line.indexOf(oldText); break; }
+    offset += line.length + 1;
+  }
   if (index < 0) return content;
   const lineStart = content.lastIndexOf('\n', index) + 1;
   const lineBreak = content.indexOf('\n', index + oldText.length);
@@ -581,6 +609,110 @@ async function collectCandidates(
   return candidates;
 }
 
+function comparisonTerms(value: string): string[] {
+  const ignored = new Set(['current', 'state', 'status', 'requirement', 'preference', 'decision', 'fact', 'user', 'vehicle', 'car', 'changed', 'update']);
+  return [...new Set((value.toLocaleLowerCase().replaceAll('_', ' ').match(/[\p{L}\p{N}]+/gu) || [])
+    .map((word) => word.replace(/(?:ment|tion|ing|ed|ers?|s)$/i, ''))
+    .filter((word) => word.length > 2 && !ignored.has(word)))];
+}
+
+function latestExplicitDate(text: string): string | undefined {
+  const dates = [...text.matchAll(/\b(20\d{2}-\d{2}-\d{2})\b/g)].map((match) => match[1]);
+  return dates.sort().at(-1);
+}
+
+function exactCurrentStatement(source: string, key: string, proposed: string, supersededText: string[]): { currentText: string; evidence: string } | undefined {
+  const keyTerms = comparisonTerms(key);
+  const proposedTerms = comparisonTerms(proposed);
+  const previousDate = latestExplicitDate(supersededText.join('\n'));
+  const candidates: Array<{ currentText: string; evidence: string; score: number }> = [];
+  for (const paragraph of source.split(/\r?\n\s*\r?\n/).map((value) => value.trim()).filter(Boolean)) {
+    const date = latestExplicitDate(paragraph);
+    if (!date || (previousDate && date <= previousDate)) continue;
+    const sentences = paragraph.split(/(?<=[.!?])\s+/).map((value) => value.replace(/^\s*[-*+]\s+/, '').trim()).filter(Boolean);
+    for (const sentence of sentences) {
+      const sentenceTerms = new Set(comparisonTerms(sentence));
+      const keyHits = keyTerms.filter((term) => sentenceTerms.has(term)).length;
+      const proposalHits = proposedTerms.filter((term) => sentenceTerms.has(term)).length;
+      const proposalRatio = proposedTerms.length ? proposalHits / proposedTerms.length : 1;
+      if ((keyTerms.length && keyHits < Math.min(2, keyTerms.length)) || proposalRatio < 0.3 || !paragraph.includes(sentence)) continue;
+      candidates.push({ currentText: sentence, evidence: paragraph, score: keyHits * 10 + proposalRatio });
+    }
+  }
+  return candidates.sort((left, right) => right.score - left.score)[0];
+}
+
+function normalizeStateKeys(items: CompilePlan[], candidates: Array<{ path: string; content: string; editable: boolean }>): CompilePlan[] {
+  return items.map((item) => {
+    if (item.decision !== 'update' || !item.stateChanges?.length) return item;
+    const candidate = candidates.find((entry) => entry.path === item.targetPath && entry.editable);
+    if (!candidate) return item;
+    return {
+      ...item,
+      stateChanges: item.stateChanges.map((change) => {
+        const labels = [...new Set(change.supersededText
+          .filter((oldText) => currentStateOccurrences(candidate.content, oldText) === 1)
+          .map((oldText) => oldText.match(/^\s*[-*+]\s+\*\*([^*]+)\*\*/)?.[1]?.trim())
+          .filter((label): label is string => Boolean(label)))];
+        return labels.length === 1 ? { ...change, key: labels[0] } : change;
+      }),
+    };
+  });
+}
+
+function repairPlanStateQuotes(items: CompilePlan[], source: string): CompilePlan[] {
+  return items.map((item) => {
+    if (item.decision !== 'update' || !item.stateChanges?.length) return item;
+    return {
+      ...item,
+      stateChanges: item.stateChanges.map((change) => {
+        const currentText = change.currentText.trim();
+        const evidenceDate = latestExplicitDate(change.evidence);
+        const previousDate = latestExplicitDate(change.supersededText.join('\n'));
+        if (source.includes(currentText) && source.includes(change.evidence) && change.evidence.includes(currentText)
+          && evidenceDate && (!previousDate || evidenceDate > previousDate)) return change;
+        const exact = exactCurrentStatement(source, change.key, currentText, change.supersededText);
+        return exact ? { ...change, currentText: exact.currentText, evidence: exact.evidence } : change;
+      }),
+    };
+  });
+}
+
+function firstStateChangeValidationIssue(
+  items: CompilePlan[],
+  source: string,
+  candidates: Array<{ path: string; content: string; editable: boolean }>,
+): { item: CompilePlan; change: NonNullable<CompilePlan['stateChanges']>[number]; candidate: { path: string; content: string; editable: boolean }; reason: string } | undefined {
+  for (const item of items) {
+    if (item.decision !== 'update' || !item.stateChanges?.length) continue;
+    const candidate = candidates.find((entry) => entry.path === item.targetPath && entry.editable);
+    if (!candidate) continue;
+    const keys = new Set<string>();
+    for (const change of item.stateChanges) {
+      const key = change.key.trim().toLocaleLowerCase();
+      const currentText = change.currentText.trim();
+      let reason = '';
+      if (keys.has(key)) reason = 'the state key is duplicated';
+      else if (/[\r\n]/.test(change.key) || /[\r\n]/.test(currentText)) reason = 'a state key or current claim contains a line break';
+      else if (!source.includes(currentText)) reason = 'the current claim is not an exact quote from the source';
+      else if (!source.includes(change.evidence) || !change.evidence.includes(currentText)) reason = 'the supporting evidence does not contain the exact current claim';
+      else {
+        const evidenceDate = latestExplicitDate(change.evidence);
+        const previousDate = latestExplicitDate(change.supersededText.join('\n'));
+        if (!evidenceDate) reason = 'the supporting evidence has no explicit ISO date';
+        else if (previousDate && evidenceDate <= previousDate) reason = 'the supporting evidence is not dated later than the superseded claim';
+        const conflictingClaim = change.supersededText.find((oldText) => /[\r\n]/.test(oldText) || currentStateOccurrences(candidate.content, oldText) !== 1);
+        if (!reason && conflictingClaim) reason = /[\r\n]/.test(conflictingClaim)
+          ? 'a superseded claim contains a line break'
+          : `a superseded claim appears ${currentStateOccurrences(candidate.content, conflictingClaim)} times in the target Current State instead of exactly once`;
+      }
+      if (reason) return { item, change, candidate, reason };
+      keys.add(key);
+    }
+  }
+  return undefined;
+}
+
 async function processItem(
   root: string,
   sourcePath: string,
@@ -643,15 +775,39 @@ async function processItem(
       delete sourceMetadata[key];
     }
     const sourceForPlan = `${JSON.stringify(sourceMetadata)}\n\n${parsed.content}`;
-    const rawPlan = await generate({
+    const generateInput = {
       sourcePath,
       source: sourceForPlan,
       candidates,
       reviewGuidance: options.reviewGuidance?.[sourcePath],
-    });
-    const items = 'items' in rawPlan
+    };
+    let rawPlan = await generate(generateInput);
+    let items = 'items' in rawPlan
       ? compileBatchSchema.parse(rawPlan).items
       : [compilePlanSchema.parse(rawPlan)];
+    items = repairPlanStateQuotes(normalizeStateKeys(items, candidates), parsed.content);
+    const invalidStateChange = firstStateChangeValidationIssue(items, sourceForPlan, candidates);
+    if (invalidStateChange && /exact quote|exact current claim/.test(invalidStateChange.reason)) {
+      const relevantSourceLines = parsed.content.split(/\r?\n/)
+        .filter((line) => line.toLocaleLowerCase().includes(invalidStateChange.change.key.toLocaleLowerCase())
+          || line.toLocaleLowerCase().includes('2026-10-')
+          || line.toLocaleLowerCase().includes('changed the requirement'))
+        .slice(0, 12).join('\n');
+      const correctionGuidance = [
+        options.reviewGuidance?.[sourcePath] || '',
+        `Automatic safety retry: the previous plan was rejected because ${invalidStateChange.reason}. Keep the same target (${invalidStateChange.candidate.path}) only if the source clearly changes it. Copy currentText as an exact, contiguous quote from the source text below; do not paraphrase. evidence must be an exact quote from the source and must contain that exact currentText. Copy supersededText exactly from the candidate. If any quote cannot be copied exactly, choose needs_review.`,
+        `Exact relevant source lines:\n${relevantSourceLines || parsed.content.slice(0, 4_000)}`,
+        `Candidate note:\n${invalidStateChange.candidate.content}`,
+      ].filter(Boolean).join('\n\n');
+      try {
+        rawPlan = await generate({ ...generateInput, reviewGuidance: correctionGuidance });
+        const retryItems = 'items' in rawPlan
+          ? compileBatchSchema.parse(rawPlan).items
+          : [compilePlanSchema.parse(rawPlan)];
+        const repairedRetry = repairPlanStateQuotes(normalizeStateKeys(retryItems, candidates), parsed.content);
+        if (!firstStateChangeValidationIssue(repairedRetry, sourceForPlan, candidates)) items = repairedRetry;
+      } catch { /* Preserve the first plan; the exact-quote check below will safely park it. */ }
+    }
     const reviewReasons = items.filter((item) => item.decision === 'needs_review').map((item) => item.rationale).filter(Boolean);
     if (reviewReasons.length) {
       const reason = reviewReasons.join(' ');
@@ -679,27 +835,11 @@ async function processItem(
           return { source: sourcePath, decision: 'needs_review', message: reason };
         }
         if (item.decision === 'update' && item.stateChanges?.length) {
-          const keys = new Set<string>();
-          for (const change of item.stateChanges) {
-            const key = change.key.trim().toLocaleLowerCase();
-            const supportedQuote = change.currentText.trim();
-            let validationIssue = '';
-            if (keys.has(key)) validationIssue = 'the state key is duplicated';
-            else if (/[\r\n]/.test(change.key) || /[\r\n]/.test(supportedQuote)) validationIssue = 'a state key or current claim contains a line break';
-            else if (!sourceForPlan.includes(supportedQuote)) validationIssue = 'the current claim is not an exact quote from the source';
-            else if (!sourceForPlan.includes(change.evidence) || !change.evidence.includes(supportedQuote)) validationIssue = 'the supporting evidence does not contain the exact current claim';
-            else {
-              const conflictingClaim = change.supersededText.find((oldText) => /[\r\n]/.test(oldText) || occurrenceCount(candidate.content, oldText) !== 1);
-              if (conflictingClaim) validationIssue = /[\r\n]/.test(conflictingClaim)
-                ? 'a superseded claim contains a line break'
-                : `a superseded claim appears ${occurrenceCount(candidate.content, conflictingClaim)} times in the target note instead of exactly once`;
-            }
-            if (validationIssue) {
-              const reason = `The compiler could not safely validate the state change for ${change.key}: ${validationIssue}. The entire source was parked without partial changes.`;
-              await markInbox(root, sourcePath, raw, { processed: false, ingestion_status: 'needs_review', ingestion_note: reason, attempted_hash: hash });
-              return { source: sourcePath, decision: 'needs_review', message: reason };
-            }
-            keys.add(key);
+          const validationIssue = firstStateChangeValidationIssue([item], sourceForPlan, candidates);
+          if (validationIssue) {
+            const reason = `The compiler could not safely validate the state change for ${validationIssue.change.key}: ${validationIssue.reason}. The entire source was parked without partial changes.`;
+            await markInbox(root, sourcePath, raw, { processed: false, ingestion_status: 'needs_review', ingestion_note: reason, attempted_hash: hash });
+            return { source: sourcePath, decision: 'needs_review', message: reason };
           }
         }
       } else if (item.decision === 'create') {
@@ -727,6 +867,18 @@ async function processItem(
     }
     journal = { sourcePath, hash, items };
     await writeJournal(options, journal);
+  }
+
+  for (const item of journal.items) {
+    if (item.decision !== 'update' || !item.stateChanges?.length || !item.targetPath) continue;
+    const latestTarget = await readText(root, item.targetPath);
+    const staleClaim = item.stateChanges.flatMap((change) => change.supersededText).find((oldText) => currentStateOccurrences(latestTarget, oldText) !== 1);
+    if (staleClaim) {
+      const reason = 'The target Current State changed after planning; no Inbox changes were applied. Review the new current value and retry.';
+      await removeJournal(options, journal.hash, journal.sourcePath);
+      await markInbox(root, sourcePath, raw, { processed: false, ingestion_status: 'needs_review', ingestion_note: reason, attempted_hash: hash });
+      return { source: sourcePath, decision: 'needs_review', message: reason };
+    }
   }
 
   const now = options.now?.() ?? new Date();

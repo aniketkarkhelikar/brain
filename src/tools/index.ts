@@ -10,3 +10,4 @@ export { vaultCatalog } from './vault-catalog.js';
 export { webSearch } from './web-search.js';
 export { webRead } from './web-read.js';
 export { skillLoad } from './skill-load.js';
+export { memoryAudit } from './memory-audit.js';

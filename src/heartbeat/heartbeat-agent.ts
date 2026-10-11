@@ -46,7 +46,7 @@ async function recordHeartbeat(root: string, timestamp: Date, timezone: string, 
       return `- ${item.decision}: \`${item.source}\`${destinations.length ? ` → ${destinations.map((target) => `\`${target}\``).join(', ')}` : ''}${item.message ? ` — ${item.message}` : ''}`;
     });
   const summary = [
-    `## Heartbeat — ${localTime} (${timezone})`,
+    `## Inbox processing — ${localTime} (${timezone})`,
     '',
     `- Inbox Markdown files scanned: ${stats.scanned}`,
     `- New wiki pages: ${stats.created}`,
@@ -58,7 +58,7 @@ async function recordHeartbeat(root: string, timestamp: Date, timezone: string, 
     '',
   ].join('\n');
   await appendLine(path.join(root, 'daily', `${localDate}.md`), `${summary}\n`);
-  await appendLine(path.join(root, 'log.md'), `- ${localTime} ${timezone}: heartbeat scanned ${stats.scanned}; created ${stats.created}; updated ${stats.updated}; already known ${stats.alreadyKnown}; review ${stats.needsReview}; failed ${stats.failed}.\n`);
+  await appendLine(path.join(root, 'log.md'), `- ${localTime} ${timezone}: Inbox processing scanned ${stats.scanned}; created ${stats.created}; updated ${stats.updated}; already known ${stats.alreadyKnown}; review ${stats.needsReview}; failed ${stats.failed}.\n`);
 }
 
 async function performHeartbeat(options: HeartbeatOptions): Promise<HeartbeatResult> {

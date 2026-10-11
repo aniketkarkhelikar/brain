@@ -5,13 +5,16 @@ import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import type { ModelMessage } from 'ai';
 import { agentStream } from '../agent.js';
+import { checkOllamaHealth } from '../providers.js';
 import { runHeartbeat } from '../heartbeat/heartbeat-agent.js';
-import { startHeartbeatSchedule, startVaultLintSchedule } from '../heartbeat/cron.js';
+import { startBrainCheckSchedule, startHeartbeatSchedule } from '../heartbeat/cron.js';
 import { readLatestVaultLint, runVaultLint } from '../heartbeat/audit.js';
+import { readLatestMemoryAudit, runMemoryAudit } from '../heartbeat/memory-audit.js';
+import { startVaultWatcher, type VaultWatchChange } from '../heartbeat/watcher.js';
 import { ingestInbox, listInboxReviewQueue } from '../heartbeat/ingest.js';
 import { compactHistory, DEFAULT_SESSION_ID, normalizeConversationMessages, SessionStore, type StoredModelMessage } from '../memory/session.js';
 import { getBootstrapStatus, submitBootstrapAnswer } from '../memory/bootstrap.js';
-import { searchVault } from '../memory/search.js';
+import { indexVault, searchVault } from '../memory/search.js';
 import { chatSourcesFromToolResults, normalizeChatSources, type ChatSource, type ToolTraceStep } from '../types/chat.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -26,9 +29,48 @@ let lastActivity: Record<string, unknown> | undefined;
 let busy = false;
 let chatBusy = false;
 let maintenanceBusy = false;
+let vaultWatcherReady = false;
+const pendingWatchChanges: VaultWatchChange[] = [];
+let watcherDrainScheduled = false;
+
+function scheduleWatcherDrain(): void {
+  if (watcherDrainScheduled || !pendingWatchChanges.length) return;
+  watcherDrainScheduled = true;
+  setTimeout(() => {
+    watcherDrainScheduled = false;
+    void drainWatchedVaultChanges();
+  }, 50);
+}
 
 function refreshBusy(): void {
   busy = chatBusy || maintenanceBusy;
+  if (!busy) scheduleWatcherDrain();
+}
+
+async function drainWatchedVaultChanges(): Promise<void> {
+  if (busy || !pendingWatchChanges.length) return;
+  const changes = pendingWatchChanges.splice(0, pendingWatchChanges.length);
+  maintenanceBusy = true;
+  refreshBusy();
+  const inboxCaptures = changes.filter((change) => /^Inbox\//i.test(change.path) && change.event !== 'unlink');
+  publish('vault-watch-start', { message: `Detected ${changes.length} Markdown change${changes.length === 1 ? '' : 's'}.` });
+  try {
+    const ingestion = inboxCaptures.length ? await ingestInbox({ vaultPath: vaultRoot, sourcePaths: inboxCaptures.map((change) => change.path) }) : undefined;
+    const index = await indexVault({ vaultPath: vaultRoot });
+    const lint = await runVaultLint(vaultRoot);
+    const memoryAudit = await runMemoryAudit({ vaultPath: vaultRoot, force: false, autoFix: true });
+    publish('vault-watch-done', {
+      message: inboxCaptures.length
+        ? `Watched Inbox update · ${ingestion?.created || 0} created · ${ingestion?.updated || 0} updated · ${ingestion?.needsReview || 0} held for review · memory audit ${memoryAudit.summary.autoFixed} corrected, ${memoryAudit.summary.needsReview} held.`
+        : `Vault refreshed · ${index.filesUpdated + index.filesAdded} notes indexed · ${lint.summary.errors} structural errors · memory audit ${memoryAudit.summary.autoFixed} corrected, ${memoryAudit.summary.needsReview} held.`,
+      stats: ingestion ? { needsReview: ingestion.needsReview } : undefined,
+    });
+  } catch (error) {
+    publish('error', { message: `Watched vault update failed: ${error instanceof Error ? error.message : String(error)}` });
+  } finally {
+    maintenanceBusy = false;
+    refreshBusy();
+  }
 }
 
 function publish(type: string, detail: Record<string, unknown> = {}) {
@@ -174,7 +216,23 @@ const server = http.createServer(async (req, res) => {
       let recentRuns: string[] = [];
       try { recentRuns = (await fs.readFile(path.join(vaultRoot, 'log.md'), 'utf8')).split(/\r?\n/).filter(Boolean).slice(-8).reverse(); } catch { /* an empty operations log is normal */ }
       const audit = await readLatestVaultLint();
-      return json(res, 200, { model: process.env.ACTIVE_MODEL || 'ollama:qwen2.5:14b', vault: path.basename(vaultRoot), vaultPath: vaultRoot, fileCount: files.length, reviewCount: queue.length, review: queue.slice(0, 5), recentRuns, sessions: store.listSessions().slice(0, 12), lastActivity, busy, schedule: process.env.HEARTBEAT_CRON || '*/30 8-22 * * *', timezone: process.env.HEARTBEAT_TIMEZONE || 'Asia/Kolkata', audit, auditSchedule: process.env.VAULT_LINT_CRON || '15 23 * * *' });
+      const memoryAudit = await readLatestMemoryAudit();
+      const brainCheckSchedule = process.env.BRAIN_CHECK_CRON || process.env.BRAIN_MEMORY_AUDIT_CRON || process.env.VAULT_LINT_CRON || '30 3 * * *';
+      return json(res, 200, { model: process.env.ACTIVE_MODEL || 'ollama:qwen2.5:14b', vault: path.basename(vaultRoot), vaultPath: vaultRoot, fileCount: files.length, reviewCount: queue.length, review: queue.slice(0, 5), recentRuns, sessions: store.listSessions().slice(0, 12), lastActivity, busy, watcherReady: vaultWatcherReady, schedule: process.env.HEARTBEAT_CRON || '*/30 8-22 * * *', brainCheckSchedule, timezone: process.env.HEARTBEAT_TIMEZONE || 'Asia/Kolkata', audit, auditSchedule: brainCheckSchedule, memoryAudit, memoryAuditSchedule: brainCheckSchedule });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/brain-check') {
+      if (maintenanceBusy || chatBusy) return json(res, 409, { error: 'Another assistant or vault operation is already running.' });
+      maintenanceBusy = true; refreshBusy(); publish('brain-check-start', { message: 'Checking vault structure and current memory.' });
+      try {
+        const audit = await runVaultLint(vaultRoot);
+        const memoryAudit = await runMemoryAudit({ vaultPath: vaultRoot, force: true, autoFix: true });
+        const result = { audit, memoryAudit };
+        publish('brain-check-done', { message: `Brain check complete · ${audit.summary.errors} structural errors · ${audit.summary.warnings} warnings · ${memoryAudit.claimsChecked} memory claims · ${memoryAudit.summary.autoFixed} corrected · ${memoryAudit.summary.needsReview} held for review.`, report: { structural: audit.summary, memory: memoryAudit.summary } });
+        return json(res, 200, result);
+      } catch (error) {
+        publish('error', { message: error instanceof Error ? error.message : String(error) });
+        throw error;
+      } finally { maintenanceBusy = false; refreshBusy(); }
     }
     if (req.method === 'GET' && url.pathname === '/api/audit') return json(res, 200, await readLatestVaultLint() || { auditedAt: null, summary: { errors: 0, warnings: 0 }, findings: [] });
     if (req.method === 'POST' && url.pathname === '/api/audit') {
@@ -183,6 +241,19 @@ const server = http.createServer(async (req, res) => {
       try {
         const report = await runVaultLint(vaultRoot);
         publish('audit-done', { message: `Vault lint complete · ${report.summary.errors} errors · ${report.summary.warnings} warnings`, report: report.summary });
+        return json(res, 200, report);
+      } catch (error) {
+        publish('error', { message: error instanceof Error ? error.message : String(error) });
+        throw error;
+      } finally { maintenanceBusy = false; refreshBusy(); }
+    }
+    if (req.method === 'GET' && url.pathname === '/api/memory-audit') return json(res, 200, await readLatestMemoryAudit() || { auditedAt: null, summary: { confirmed: 0, contradicted: 0, unsupported: 0, unclear: 0, autoFixed: 0, needsReview: 0 }, findings: [], coverage: null });
+    if (req.method === 'POST' && url.pathname === '/api/memory-audit') {
+      if (maintenanceBusy || chatBusy) return json(res, 409, { error: 'Another assistant or vault operation is already running.' });
+      maintenanceBusy = true; refreshBusy(); publish('memory-audit-start', { message: 'AI memory audit started.' });
+      try {
+        const report = await runMemoryAudit({ vaultPath: vaultRoot, force: true, autoFix: true });
+        publish('memory-audit-done', { message: `Memory audit complete · ${report.claimsChecked} claims checked · ${report.summary.autoFixed} corrected · ${report.summary.needsReview} held for review.`, report: report.summary });
         return json(res, 200, report);
       } catch (error) {
         publish('error', { message: error instanceof Error ? error.message : String(error) });
@@ -284,8 +355,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/heartbeat') {
       if (maintenanceBusy || chatBusy) return json(res, 409, { error: 'Another assistant or vault operation is already running.' });
-      maintenanceBusy = true; refreshBusy(); publish('heartbeat-start', { message: 'Scheduled brain check started.' });
-      try { const result = await runHeartbeat({ vaultPath: vaultRoot, timezone: process.env.HEARTBEAT_TIMEZONE || 'Asia/Kolkata' }); publish('heartbeat-done', { message: 'Brain check complete.', stats: result.ingestion }); return json(res, 200, result); }
+      maintenanceBusy = true; refreshBusy(); publish('heartbeat-start', { message: 'Inbox processing started.' });
+      try { const result = await runHeartbeat({ vaultPath: vaultRoot, timezone: process.env.HEARTBEAT_TIMEZONE || 'Asia/Kolkata' }); publish('heartbeat-done', { message: 'Inbox processing complete.', stats: result.ingestion }); return json(res, 200, result); }
       catch (error) { publish('error', { message: error instanceof Error ? error.message : String(error) }); throw error; }
       finally { maintenanceBusy = false; refreshBusy(); }
     }
@@ -303,32 +374,48 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+let vaultWatcher: ReturnType<typeof startVaultWatcher> | undefined;
 server.listen(port, host, () => {
   console.log(`Second Brain UI ready at http://${host}:${port} · vault ${vaultRoot}`);
   startHeartbeatSchedule({ vaultPath: vaultRoot, onStatus: (status, detail) => {
-    if (status === 'started') { maintenanceBusy = true; refreshBusy(); publish('heartbeat-start', { message: 'Scheduled brain check started.' }); }
-    else if (status === 'completed') { maintenanceBusy = false; refreshBusy(); publish('heartbeat-done', { message: 'Scheduled brain check complete.', stats: (detail as any)?.items ? detail : undefined }); }
+    if (status === 'started') { maintenanceBusy = true; refreshBusy(); publish('heartbeat-start', { message: 'Scheduled Inbox processing started.' }); }
+    else if (status === 'completed') { maintenanceBusy = false; refreshBusy(); publish('heartbeat-done', { message: 'Scheduled Inbox processing complete.', stats: (detail as any)?.items ? detail : undefined }); }
     else if (status === 'failed') { maintenanceBusy = false; refreshBusy(); publish('error', { message: detail instanceof Error ? detail.message : String(detail) }); }
-    else if (status === 'scheduled') publish('schedule-ready', { message: 'Automatic brain checks are scheduled.' });
+    else if (status === 'scheduled') publish('schedule-ready', { message: 'Automatic Inbox processing is scheduled.' });
   }, shouldRun: () => !maintenanceBusy && !chatBusy });
-  startVaultLintSchedule({ vaultPath: vaultRoot, onStatus: (status, detail) => {
-    if (status === 'started') { maintenanceBusy = true; refreshBusy(); publish('audit-start', { message: 'Scheduled vault lint started.' }); }
-    else if (status === 'completed') { maintenanceBusy = false; refreshBusy(); const report = detail as { summary?: { errors: number; warnings: number } }; publish('audit-done', { message: `Vault lint complete · ${report.summary?.errors ?? 0} errors · ${report.summary?.warnings ?? 0} warnings`, report: report.summary }); }
+  startBrainCheckSchedule({ vaultPath: vaultRoot, onStatus: (status, detail) => {
+    if (status === 'started') { maintenanceBusy = true; refreshBusy(); publish('brain-check-start', { message: 'Scheduled brain checks started.' }); }
+    else if (status === 'completed') {
+      maintenanceBusy = false; refreshBusy();
+      const report = detail as { lint: Awaited<ReturnType<typeof runVaultLint>>; memoryAudit: Awaited<ReturnType<typeof runMemoryAudit>> };
+      publish('brain-check-done', { message: `Brain check complete · ${report.lint.summary.errors} structural errors · ${report.lint.summary.warnings} warnings · ${report.memoryAudit.claimsChecked} memory claims · ${report.memoryAudit.summary.autoFixed} corrected · ${report.memoryAudit.summary.needsReview} held for review.`, report: { structural: report.lint.summary, memory: report.memoryAudit.summary } });
+    }
     else if (status === 'failed') { maintenanceBusy = false; refreshBusy(); publish('error', { message: detail instanceof Error ? detail.message : String(detail) }); }
-    else if (status === 'scheduled') publish('audit-schedule-ready', { message: 'Automatic vault lint is scheduled.' });
+    else if (status === 'scheduled') publish('brain-check-schedule-ready', { message: 'Automatic brain checks are scheduled.' });
   }, shouldRun: () => !maintenanceBusy && !chatBusy });
+  vaultWatcher = startVaultWatcher({
+    vaultPath: vaultRoot,
+    onReady: () => { vaultWatcherReady = true; publish('vault-watch-ready', { message: 'Markdown vault changes are being watched.' }); },
+    onBatch: async (changes) => { pendingWatchChanges.push(...changes); scheduleWatcherDrain(); },
+    onError: (error) => publish('error', { message: `Vault watcher: ${error.message}` }),
+  });
   void (async () => {
     let previousAudit: Awaited<ReturnType<typeof readLatestVaultLint>>;
-    try { previousAudit = await readLatestVaultLint(); } catch { previousAudit = undefined; }
-    const lastRun = previousAudit?.auditedAt ? Date.parse(previousAudit.auditedAt) : 0;
-    if (maintenanceBusy || chatBusy || (Number.isFinite(lastRun) && Date.now() - lastRun < 24 * 60 * 60 * 1_000)) return;
-    maintenanceBusy = true; refreshBusy(); publish('audit-start', { message: 'Running the overdue vault lint.' });
+    let previousMemoryAudit: Awaited<ReturnType<typeof readLatestMemoryAudit>>;
+    try { [previousAudit, previousMemoryAudit] = await Promise.all([readLatestVaultLint(), readLatestMemoryAudit()]); }
+    catch { return; }
+    const isStale = (value?: string) => !value || !Number.isFinite(Date.parse(value)) || Date.now() - Date.parse(value) >= 24 * 60 * 60 * 1_000;
+    if (!isStale(previousAudit?.auditedAt) && !isStale(previousMemoryAudit?.auditedAt)) return;
+    if (maintenanceBusy || chatBusy) return;
+    try { if ((await getBootstrapStatus(vaultRoot)).required || !(await checkOllamaHealth())) return; } catch { return; }
+    maintenanceBusy = true; refreshBusy(); publish('brain-check-start', { message: 'Running the overdue brain checks.' });
     try {
-      const report = await runVaultLint(vaultRoot);
-      publish('audit-done', { message: `Vault lint complete · ${report.summary.errors} errors · ${report.summary.warnings} warnings`, report: report.summary });
+      const audit = await runVaultLint(vaultRoot);
+      const memoryAudit = await runMemoryAudit({ vaultPath: vaultRoot, force: true, autoFix: true });
+      publish('brain-check-done', { message: `Brain check complete · ${audit.summary.errors} structural errors · ${audit.summary.warnings} warnings · ${memoryAudit.claimsChecked} memory claims · ${memoryAudit.summary.autoFixed} corrected · ${memoryAudit.summary.needsReview} held for review.`, report: { structural: audit.summary, memory: memoryAudit.summary } });
     } catch (error) {
       publish('error', { message: error instanceof Error ? error.message : String(error) });
     } finally { maintenanceBusy = false; refreshBusy(); }
   })();
 });
-server.on('close', () => { store.close(); });
+server.on('close', () => { void vaultWatcher?.close(); store.close(); });

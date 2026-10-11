@@ -7,7 +7,7 @@
 
 import { generateText, isStepCount, streamText, type ModelMessage, type StreamTextResult, type ToolSet } from 'ai';
 import { getLanguageModel } from './providers.js';
-import { vaultRead, vaultWrite, vaultSearch, vaultList, vaultCatalog, webSearch, webRead, skillLoad } from './tools/index.js';
+import { vaultRead, vaultWrite, vaultSearch, vaultList, vaultCatalog, webSearch, webRead, skillLoad, memoryAudit } from './tools/index.js';
 import { runVaultSearch } from './tools/vault-search.js';
 import { readVaultCatalog } from './tools/vault-catalog.js';
 import { discoverSkills, formatSkillsPrompt, loadSkill, type SkillMetadata } from './skills/loader.js';
@@ -103,6 +103,7 @@ const allTools: ToolSet = {
   webSearch,
   webRead,
   skillLoad,
+  memoryAudit,
 };
 
 export function applicableDecisionSkill(prompt: string, skills: SkillMetadata[]): SkillMetadata | undefined {
@@ -115,9 +116,19 @@ export function applicableDecisionSkill(prompt: string, skills: SkillMetadata[])
     : undefined;
 }
 
+function applicableWorkflowSkill(prompt: string, skills: SkillMetadata[]): SkillMetadata | undefined {
+  const normalized = prompt.toLocaleLowerCase();
+  const aboutMemory = /\b(?:vault|second brain|memory|notes?|knowledge base|stale facts?|contradictions?|memory rot)\b/.test(normalized);
+  if (!aboutMemory) return undefined;
+  const fixIntent = /\b(?:fix|correct|resolve|repair|clean up|update|apply)\b/.test(normalized)
+    && /\b(?:audit|lint|finding|findings|contradiction|contradictions|stale|memory|vault|notes?)\b/.test(normalized);
+  const requestedName = fixIntent ? 'second-brain-fix' : 'second-brain-audit';
+  return skills.find((skill) => skill.name === requestedName || skill.dirName === requestedName);
+}
+
 async function getSkillsContext(prompt: string, onToolActivity?: (toolName: string, input: unknown) => void): Promise<{ context: string; sources: ChatSource[] }> {
   const skills = await discoverSkills({ refresh: true });
-  const selected = applicableDecisionSkill(prompt, skills);
+  const selected = applicableDecisionSkill(prompt, skills) || applicableWorkflowSkill(prompt, skills);
   if (!selected) return { context: formatSkillsPrompt(skills), sources: [] };
   onToolActivity?.('skillLoad', { skillName: selected.name });
   const loaded = await loadSkill(selected.name);
