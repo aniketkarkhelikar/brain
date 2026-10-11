@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import type { ModelMessage } from 'ai';
+import { normalizeChatSources, normalizeToolTrace, type ChatSource, type ToolTraceStep } from '../types/chat.js';
 
 export const DEFAULT_SESSION_ID = 'default';
 export const DEFAULT_CONTEXT_LIMIT = 16;
@@ -15,6 +16,8 @@ type SessionRow = {
   messages_json: string;
 };
 
+export type StoredModelMessage = ModelMessage & { sources?: ChatSource[]; toolTrace?: ToolTraceStep[] };
+
 export type SessionInfo = {
   id: string;
   name: string;
@@ -22,6 +25,20 @@ export type SessionInfo = {
   updatedAt: string;
   messageCount: number;
 };
+
+/** Keep only conversational text; tool calls/results are execution details, not chat history. */
+export function normalizeConversationMessages(messages: ModelMessage[]): ModelMessage[] {
+  const normalized: ModelMessage[] = [];
+  for (const message of messages) {
+    if (message.role !== 'user' && message.role !== 'assistant') continue;
+    const content = typeof message.content === 'string'
+      ? message.content
+      : message.content.flatMap((part: any) => part.type === 'text' ? [part.text] : []).join('');
+    if (!content.trim()) continue;
+    normalized.push({ role: message.role, content });
+  }
+  return normalized;
+}
 
 /** Keep the opening context and the most recent messages sent back to the model. */
 export function compactHistory(
@@ -35,13 +52,16 @@ export function compactHistory(
   if (!Number.isSafeInteger(openingMessages) || openingMessages < 0 || openingMessages >= maxMessages) {
     throw new Error('openingMessages must be a non-negative integer smaller than maxMessages.');
   }
-  if (messages.length <= maxMessages) return messages;
+  const conversation = normalizeConversationMessages(messages);
+  if (conversation.length <= maxMessages) return conversation;
 
   const recentCount = maxMessages - openingMessages;
-  return [...messages.slice(0, openingMessages), ...messages.slice(-recentCount)];
+  let recentStart = Math.max(openingMessages, conversation.length - recentCount);
+  if (conversation[recentStart]?.role !== 'user') recentStart -= 1;
+  return [...conversation.slice(0, openingMessages), ...conversation.slice(recentStart)];
 }
 
-function parseMessages(serialized: string, sessionId: string): ModelMessage[] {
+function parseMessages(serialized: string, sessionId: string): StoredModelMessage[] {
   let messages: unknown;
   try {
     messages = JSON.parse(serialized);
@@ -56,7 +76,7 @@ function parseMessages(serialized: string, sessionId: string): ModelMessage[] {
   )) {
     throw new Error(`Saved chat history for session "${sessionId}" has an invalid message format.`);
   }
-  return messages as ModelMessage[];
+  return messages as StoredModelMessage[];
 }
 
 export class SessionStore {
@@ -64,6 +84,7 @@ export class SessionStore {
   private readonly insertSession: Database.Statement;
   private readonly selectSession: Database.Statement;
   private readonly updateMessages: Database.Statement;
+  private readonly updateSessionName: Database.Statement;
 
   constructor(dbPath = process.env.BRAIN_SESSION_DB || './state/sessions.sqlite') {
     const resolvedDbPath = path.resolve(dbPath);
@@ -91,6 +112,7 @@ export class SessionStore {
     `);
     this.selectSession = this.db.prepare('SELECT * FROM sessions WHERE id = ?');
     this.updateMessages = this.db.prepare('UPDATE sessions SET messages_json = ?, updated_at = ? WHERE id = ?');
+    this.updateSessionName = this.db.prepare('UPDATE sessions SET name = ? WHERE id = ? AND name IN (\'New chat\', \'New conversation\')');
   }
 
   ensureSession(id = DEFAULT_SESSION_ID, name = 'Default chat'): SessionInfo {
@@ -128,15 +150,57 @@ export class SessionStore {
     const append = this.db.transaction(() => {
       const row = this.selectSession.get(sessionId) as SessionRow | undefined;
       if (!row) throw new Error(`Session "${sessionId}" does not exist.`);
-      const current = parseMessages(row.messages_json, sessionId);
-      const next: ModelMessage[] = [
+      const current = parseMessages(row.messages_json, sessionId)
+        .filter((message) => message.role === 'user' || message.role === 'assistant')
+        .map((message) => ({ ...message }));
+      const next: StoredModelMessage[] = [
         ...current,
         { role: 'user', content: userText },
-        ...responseMessages,
+        ...normalizeConversationMessages(responseMessages).filter((message) => message.role === 'assistant'),
       ];
+      this.nameConversation(sessionId, row.name, userText);
       const serialized = JSON.stringify(next);
       parseMessages(serialized, sessionId);
       this.updateMessages.run(serialized, new Date().toISOString(), sessionId);
+    });
+    append();
+  }
+
+  /** Save a submitted prompt before generation so a refresh or model error cannot erase it. */
+  appendUserMessage(sessionId: string, userText: string): void {
+    if (!userText.trim()) throw new Error('Cannot save an empty user message.');
+    const append = this.db.transaction(() => {
+      const row = this.selectSession.get(sessionId) as SessionRow | undefined;
+      if (!row) throw new Error(`Session "${sessionId}" does not exist.`);
+      const current = parseMessages(row.messages_json, sessionId)
+        .filter((message) => message.role === 'user' || message.role === 'assistant')
+        .map((message) => ({ ...message }));
+      current.push({ role: 'user', content: userText });
+      this.nameConversation(sessionId, row.name, userText);
+      this.updateMessages.run(JSON.stringify(current), new Date().toISOString(), sessionId);
+    });
+    append();
+  }
+
+  /** Save the assistant response and source trail for review after the turn completes. */
+  appendAssistantMessage(sessionId: string, responseMessages: ModelMessage[], sources: ChatSource[] = [], toolTrace: ToolTraceStep[] = []): void {
+    const assistantMessages = normalizeConversationMessages(responseMessages)
+      .filter((message) => message.role === 'assistant') as StoredModelMessage[];
+    if (!assistantMessages.length) return;
+    const normalizedSources = normalizeChatSources(sources);
+    assistantMessages[assistantMessages.length - 1] = {
+      ...assistantMessages[assistantMessages.length - 1],
+      ...(normalizedSources.length ? { sources: normalizedSources } : {}),
+      ...(normalizeToolTrace(toolTrace).length ? { toolTrace: normalizeToolTrace(toolTrace) } : {}),
+    };
+    const append = this.db.transaction(() => {
+      const row = this.selectSession.get(sessionId) as SessionRow | undefined;
+      if (!row) throw new Error(`Session "${sessionId}" does not exist.`);
+      const current = parseMessages(row.messages_json, sessionId)
+        .filter((message) => message.role === 'user' || message.role === 'assistant')
+        .map((message) => ({ ...message }));
+      const next = [...current, ...assistantMessages];
+      this.updateMessages.run(JSON.stringify(next), new Date().toISOString(), sessionId);
     });
     append();
   }
@@ -159,5 +223,11 @@ export class SessionStore {
       updatedAt: row.updated_at,
       messageCount: parseMessages(row.messages_json, row.id).length,
     };
+  }
+
+  private nameConversation(sessionId: string, currentName: string, firstPrompt: string): void {
+    if (!['New chat', 'New conversation'].includes(currentName)) return;
+    const title = firstPrompt.replace(/\s+/g, ' ').trim().slice(0, 52);
+    if (title) this.updateSessionName.run(title, sessionId);
   }
 }

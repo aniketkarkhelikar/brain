@@ -1,7 +1,7 @@
 /** Compile raw Inbox notes into the human-readable Markdown wiki. */
 
 import { createHash } from 'node:crypto';
-import type { Dirent } from 'node:fs';
+import { constants as fsConstants, type Dirent } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -340,6 +340,103 @@ async function markInbox(
   await atomicWrite(root, relativePath, matter.stringify(parsed.content, { ...parsed.data, ...metadata }));
 }
 
+function archivePathFor(sourcePath: string, hash: string): string {
+  const inboxPrefix = 'Inbox/';
+  const relative = sourcePath.startsWith(inboxPrefix) ? sourcePath.slice(inboxPrefix.length) : path.posix.basename(sourcePath);
+  const parsed = path.posix.parse(relative);
+  const filename = `${parsed.name}--${hash.slice(0, 12)}${parsed.ext || '.md'}`;
+  return normalizeRelative(path.posix.join('Archive', 'Inbox', parsed.dir, filename));
+}
+
+function archiveOnlyReviewGuidance(guidance: string | undefined): boolean {
+  if (!guidance?.trim()) return false;
+  const affirmative = guidance.trim().replace(/\b(?:don't|dont|do not|never|avoid)\s+(?:just\s+)?(?:update|create|compile|rewrite|merge)\b/gi, '');
+  if (/\b(?:don't|dont|do not|never|avoid)\s+(?:just\s+)?(?:archive|move\b.{0,40}\barchive)\b/i.test(affirmative)) return false;
+  if (/\b(?:create|update|compile|rewrite|merge)\b/i.test(affirmative)) return false;
+  return /\barchive\b|\bmove\b.{0,40}\barchive\b/i.test(affirmative);
+}
+
+async function rewriteInboxLinks(root: string, sourcePath: string, archivePath: string): Promise<void> {
+  const oldTarget = sourcePath.replace(/\.md$/i, '');
+  const newTarget = archivePath.replace(/\.md$/i, '');
+  if (oldTarget === newTarget) return;
+
+  for (const notePath of await walkMarkdown(root)) {
+    const content = await readText(root, notePath);
+    const rewritten = content.replace(/\[\[([^\]]+)\]\]/g, (whole, inner: string) => {
+      const splitAt = inner.search(/[|#]/);
+      const linkedPath = (splitAt < 0 ? inner : inner.slice(0, splitAt)).trim().replaceAll('\\', '/').replace(/\.md$/i, '');
+      const resolvedLink = linkedPath.startsWith('../') || linkedPath.startsWith('./')
+        ? path.posix.normalize(path.posix.join(path.posix.dirname(notePath), linkedPath))
+        : linkedPath;
+      if (linkedPath !== oldTarget && resolvedLink !== oldTarget) return whole;
+      const suffix = splitAt < 0 ? '' : inner.slice(splitAt);
+      return `[[${newTarget}${suffix}]]`;
+    });
+    if (rewritten !== content) await atomicWrite(root, notePath, rewritten);
+  }
+}
+
+async function rewriteLinksAfterArchive(root: string, sourcePath: string, archivePath: string): Promise<void> {
+  try {
+    await rewriteInboxLinks(root, sourcePath, archivePath);
+  } catch (error) {
+    console.error(`Archived ${sourcePath}, but some existing links may still point to Inbox: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function archiveInboxSource(root: string, sourcePath: string, archivePath: string): Promise<void> {
+  const rootRealPath = await fs.realpath(root);
+  const sourceSegments = safeSegments(sourcePath);
+  const destinationSegments = safeSegments(archivePath);
+  const sourceFullPath = path.join(rootRealPath, ...sourceSegments);
+  const destinationFullPath = path.join(rootRealPath, ...destinationSegments);
+  assertContained(rootRealPath, sourceFullPath);
+  assertContained(rootRealPath, destinationFullPath);
+
+  let parent = rootRealPath;
+  for (const segment of destinationSegments.slice(0, -1)) {
+    const next = path.join(parent, segment);
+    try {
+      await fs.mkdir(next, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    const stats = await fs.lstat(next);
+    if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error(`Unsafe archive directory: ${archivePath}`);
+    parent = await fs.realpath(next);
+    assertContained(rootRealPath, parent);
+  }
+
+  try {
+    const existing = await fs.lstat(destinationFullPath);
+    if (existing.isSymbolicLink() || !existing.isFile()) throw new Error(`Unsafe archive target: ${archivePath}`);
+    const [sourceText, archivedText] = await Promise.all([
+      fs.readFile(sourceFullPath, 'utf8'),
+      fs.readFile(destinationFullPath, 'utf8'),
+    ]);
+    if (sourceText !== archivedText) throw new Error(`Archive target already exists with different content: ${archivePath}`);
+    await fs.rm(sourceFullPath);
+    await rewriteLinksAfterArchive(root, sourcePath, archivePath);
+    return;
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+  }
+
+  try {
+    await fs.copyFile(sourceFullPath, destinationFullPath, fsConstants.COPYFILE_EXCL);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    const [sourceText, archivedText] = await Promise.all([
+      fs.readFile(sourceFullPath, 'utf8'),
+      fs.readFile(destinationFullPath, 'utf8'),
+    ]);
+    if (sourceText !== archivedText) throw new Error(`Archive target already exists with different content: ${archivePath}`);
+  }
+  await fs.rm(sourceFullPath);
+  await rewriteLinksAfterArchive(root, sourcePath, archivePath);
+}
+
 function actionMarker(hash: string, actionIndex: number): string {
   return `${SOURCE_MARKER}${hash}:${actionIndex} -->`;
 }
@@ -431,7 +528,14 @@ async function processItem(
   const raw = await readText(root, sourcePath);
   const parsed = matter(raw);
   const hash = sourceHash(parsed);
+  const archivePath = archivePathFor(sourcePath, hash);
+  const reviewGuidance = options.reviewGuidance?.[sourcePath];
+  if (options.retryNeedsReview && archiveOnlyReviewGuidance(reviewGuidance)) {
+    await archiveInboxSource(root, sourcePath, archivePath);
+    return { source: sourcePath, decision: 'unchanged', message: `Archived at ${archivePath} following your review guidance.` };
+  }
   if (parsed.data.processed === true && parsed.data.processed_hash === hash) {
+    await archiveInboxSource(root, sourcePath, archivePath);
     return { source: sourcePath, decision: 'unchanged', targetPath: typeof parsed.data.compiled_to === 'string' ? parsed.data.compiled_to : undefined };
   }
   let journal = await readPendingJournal(options, sourcePath, hash);
@@ -464,6 +568,7 @@ async function processItem(
         ingestion_status: 'compiled',
         compiled_to: markerTarget,
       });
+      await archiveInboxSource(root, sourcePath, archivePath);
       return { source: sourcePath, decision: 'updated', targetPath: markerTarget, message: 'Recovered an interrupted compile from its source marker.' };
     }
   }
@@ -557,7 +662,7 @@ async function processItem(
     if (item.decision === 'update') {
       const previousContent = await readText(root, targetPath);
       if (!previousContent.includes(marker)) {
-        await atomicWrite(root, targetPath, `${previousContent.trimEnd()}\n${buildUpdate(item, sourcePath, marker, now)}`);
+        await atomicWrite(root, targetPath, `${previousContent.trimEnd()}\n${buildUpdate(item, archivePath, marker, now)}`);
       }
       updatedCount += 1;
     } else {
@@ -566,7 +671,7 @@ async function processItem(
         if (!existing.includes(marker)) throw new Error(`The proposed new note already exists and was not overwritten: ${targetPath}`);
       } catch (error) {
         if (!isMissing(error)) throw error;
-        await atomicWrite(root, targetPath, buildNewNote(item, sourcePath, marker, now));
+        await atomicWrite(root, targetPath, buildNewNote(item, archivePath, marker, now));
       }
       createdCount += 1;
     }
@@ -581,6 +686,7 @@ async function processItem(
     compiled_to: targetPaths.length === 1 ? targetPaths[0] : targetPaths,
   });
   await removeJournal(options, journal.hash, journal.sourcePath);
+  await archiveInboxSource(root, sourcePath, archivePath);
 
   const decision: InboxItemResult['decision'] = journal.items.length > 1
     ? 'compiled'

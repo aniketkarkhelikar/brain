@@ -87,7 +87,9 @@ describe('Phase 3 vault tools', () => {
   });
 
   it('registers the vault inventory route and loads the configured vault context', async () => {
-    assert.deepEqual(Object.keys(allTools).sort(), ['vaultCatalog', 'vaultList', 'vaultRead', 'vaultSearch', 'vaultWrite'].sort());
+    assert.deepEqual(Object.keys(allTools).sort(), [
+      'skillLoad', 'vaultCatalog', 'vaultList', 'vaultRead', 'vaultSearch', 'vaultWrite', 'webRead', 'webSearch',
+    ].sort());
     const context = await loadVaultContext();
     assert.match(context, /=== SOUL\.md === \(not found\)/);
     assert.match(context, /=== MEMORY\.md ===/);

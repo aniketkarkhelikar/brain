@@ -18,6 +18,16 @@ async function write(relativePath: string, content: string): Promise<void> {
   await fs.writeFile(fullPath, content);
 }
 
+async function archivedInboxPath(sourcePath: string): Promise<string> {
+  const relative = sourcePath.replace(/^Inbox\//, '');
+  const parsed = path.posix.parse(relative);
+  const archiveDirectory = path.join(vaultPath, 'Archive', 'Inbox', ...parsed.dir.split('/').filter(Boolean));
+  const entries = await fs.readdir(archiveDirectory);
+  const archivedName = entries.find((entry) => entry.startsWith(`${parsed.name}--`) && entry.endsWith(parsed.ext || '.md'));
+  assert.ok(archivedName, `expected ${sourcePath} to be archived`);
+  return path.join(archiveDirectory, archivedName);
+}
+
 async function resetVault(): Promise<void> {
   await fs.rm(vaultPath, { recursive: true, force: true });
   await fs.rm(path.dirname(dbPath), { recursive: true, force: true });
@@ -100,29 +110,30 @@ describe('Phase 6 Inbox compiler and heartbeat', () => {
 
     const created = await fs.readFile(path.join(vaultPath, 'Knowledgebase/concepts/personal-knowledge-systems.md'), 'utf8');
     assert.match(created, /Personal knowledge systems collect/);
-    assert.match(created, /\[\[Inbox\/notes\/new-concept\]\]/);
+    assert.match(created, /\[\[Archive\/Inbox\/notes\/new-concept--[a-f0-9]{12}\]\]/);
     assert.match(created, /ai-brain-source-sha256:/);
 
     const updated = await fs.readFile(path.join(vaultPath, 'Work/projects/commute.md'), 'utf8');
     assert.match(updated, /Existing project facts stay intact/);
     assert.match(updated, /The project now plans to use an electric bicycle/);
-    assert.match(updated, /\[\[Inbox\/notes\/commute-update\]\]/);
+    assert.match(updated, /\[\[Archive\/Inbox\/notes\/commute-update--[a-f0-9]{12}\]\]/);
 
-    const inbox = matter(await fs.readFile(path.join(vaultPath, 'Inbox/notes/new-concept.md'), 'utf8'));
-    assert.equal(inbox.data.processed, true);
-    assert.equal(typeof inbox.data.processed_hash, 'string');
+    const archived = matter(await fs.readFile(await archivedInboxPath('Inbox/notes/new-concept.md'), 'utf8'));
+    assert.equal(archived.data.processed, true);
+    assert.equal(typeof archived.data.processed_hash, 'string');
     const rerun = await ingestInbox(options);
-    assert.equal(rerun.created + rerun.updated + rerun.alreadyKnown, 0);
-    assert.equal(rerun.items.filter((item) => item.decision === 'unchanged').length, 2);
+    assert.equal(rerun.scanned, 0, 'archived sources are no longer in the Inbox queue');
+    assert.equal(rerun.items.length, 0);
     assert.equal(generatedSources.length, 2);
 
-    const sourcePath = path.join(vaultPath, 'Inbox/notes/new-concept.md');
+    const sourcePath = await archivedInboxPath('Inbox/notes/new-concept.md');
     const source = matter(await fs.readFile(sourcePath, 'utf8'));
     for (const key of ['processed', 'processed_hash', 'processed_at', 'ingestion_status', 'compiled_to']) delete source.data[key];
-    await fs.writeFile(sourcePath, matter.stringify(source.content, { ...source.data, processed: false }));
+    await write('Inbox/notes/new-concept-replay.md', matter.stringify(source.content, { ...source.data, processed: false }));
     const recovered = await ingestInbox(options);
     assert.equal(recovered.updated, 1);
     assert.equal(generatedSources.length, 2, 'the provenance marker should recover without another model call');
+    assert.ok(await archivedInboxPath('Inbox/notes/new-concept-replay.md'));
     const recoveredPage = await fs.readFile(path.join(vaultPath, 'Knowledgebase/concepts/personal-knowledge-systems.md'), 'utf8');
     assert.equal((recoveredPage.match(/Personal knowledge systems collect/g) ?? []).length, 1);
   });
@@ -206,7 +217,7 @@ describe('Phase 6 Inbox compiler and heartbeat', () => {
     assert.match(await fs.readFile(path.join(vaultPath, 'Work/projects/sarah-api.md'), 'utf8'), /compare gateway logs tomorrow/);
     assert.match(await fs.readFile(path.join(vaultPath, 'Work/decisions/renew-example-test-domain.md'), 'utf8'), /before Friday/);
     assert.match(await fs.readFile(path.join(vaultPath, 'Knowledgebase/concepts/rust-vector-caching-idea.md'), 'utf8'), /repeated embedding work/);
-    const source = matter(await fs.readFile(path.join(vaultPath, 'Inbox/notes/evening-dump.md'), 'utf8'));
+    const source = matter(await fs.readFile(await archivedInboxPath('Inbox/notes/evening-dump.md'), 'utf8'));
     assert.equal(source.data.processed, true);
     assert.ok(Array.isArray(source.data.compiled_to));
   });
@@ -260,8 +271,10 @@ describe('Phase 6 Inbox compiler and heartbeat', () => {
     const updated = await fs.readFile(path.join(vaultPath, projectPath), 'utf8');
     assert.match(updated, /A compiler idea was captured/);
     assert.equal((updated.match(/ai-brain-source-sha256:/g) ?? []).length, 1);
-    const source = matter(await fs.readFile(path.join(vaultPath, 'Inbox/notes/recovery-dump.md'), 'utf8'));
+    const source = matter(await fs.readFile(await archivedInboxPath('Inbox/notes/recovery-dump.md'), 'utf8'));
     assert.equal(source.data.processed, true);
+    for (const key of ['processed', 'processed_hash', 'processed_at', 'ingestion_status', 'ingestion_note', 'attempted_hash', 'compiled_to']) delete source.data[key];
+    await write('Inbox/notes/recovery-dump.md', matter.stringify(`${source.content.trimEnd()}\n\nA changed version that should be reviewed separately.\n`, { ...source.data, processed: false }));
     const changedVersion = await ingestInbox({
       ...options,
       retryNeedsReview: true,
@@ -322,6 +335,29 @@ describe('Phase 6 Inbox compiler and heartbeat', () => {
     assert.equal(result.alreadyKnown, 1);
     assert.equal(result.created + result.updated, 0);
     assert.equal(await fs.readFile(path.join(vaultPath, 'Work/projects/fern.md'), 'utf8'), '# Fern project\n\nThe project already uses weekly reviews.\n');
+  });
+
+  it('archives an already-processed review item directly when the user explicitly asks to archive it', async () => {
+    await resetVault();
+    await write('index.md', '# Vault Index\n\n[[Inbox/notes/archive-me]]\n');
+    await write('Inbox/notes/archive-me.md', '---\nprocessed: true\nprocessed_hash: stale-hash\ningestion_status: needs_review\n---\n\nThis was already handled and should be retained in the archive.\n');
+    let compilerCalled = false;
+    const result = await ingestInbox(baseOptions({
+      retryNeedsReview: true,
+      sourcePaths: ['Inbox/notes/archive-me.md'],
+      reviewGuidance: { 'Inbox/notes/archive-me.md': 'This was already processed; archive the source only.' },
+      generatePlan: async () => {
+        compilerCalled = true;
+        throw new Error('The model should not be needed to archive this source.');
+      },
+    }));
+    assert.equal(compilerCalled, false);
+    assert.equal(result.needsReview, 0);
+    assert.match(result.items[0]?.message || '', /Archived at Archive\/Inbox\/notes\/archive-me--/);
+    await assert.rejects(fs.access(path.join(vaultPath, 'Inbox/notes/archive-me.md')));
+    const archivedPath = await archivedInboxPath('Inbox/notes/archive-me.md');
+    assert.match(await fs.readFile(archivedPath, 'utf8'), /already handled and should be retained/);
+    assert.match(await fs.readFile(path.join(vaultPath, 'index.md'), 'utf8'), /\[\[Archive\/Inbox\/notes\/archive-me--/);
   });
 
   it('does not follow a symlinked wiki category when creating a destination', async () => {

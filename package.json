@@ -6,12 +6,13 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "tsx src/ui/server.ts",
-    "test": "tsx --test src/tools/vault-tools.test.ts src/memory/session.test.ts src/memory/bootstrap.test.ts src/memory/search.test.ts src/heartbeat/ingest.test.ts src/cli.test.ts",
+    "test": "tsx --test src/agent.test.ts src/tools/vault-tools.test.ts src/tools/web-search.test.ts src/types/chat.test.ts src/memory/session.test.ts src/memory/bootstrap.test.ts src/memory/search.test.ts src/heartbeat/audit.test.ts src/heartbeat/ingest.test.ts src/cli.test.ts",
     "index:vault": "tsx src/memory/index-vault.ts",
     "test:embeddings": "tsx src/test-embeddings.ts",
     "test:memory": "tsx src/test-memory-search.ts",
     "test:ingest": "tsx src/test-ingest.ts",
     "heartbeat": "tsx src/heartbeat/cron.ts",
+    "audit": "tsx src/heartbeat/cron.ts --audit",
     "test:connection": "tsx src/test-connection.ts",
     "test:agent": "tsx src/test-agent.ts",
     "test:search": "tsx --test src/tools/vault-tools.test.ts",
@@ -20,7 +21,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^2.0.0",
     "ai": "^7.0.0",
     "better-sqlite3": "^11.7.0",
     "chalk": "^5.4.1",
@@ -30,7 +30,6 @@
     "html-to-text": "^9.0.5",
     "imapflow": "^1.0.171",
     "node-cron": "^3.0.3",
-    "node-ical": "^0.18.0",
     "ollama-ai-provider-v2": "^4.0.0",
     "sqlite-vec": "0.1.8",
     "zod": "^4.0.16"

@@ -7,3 +7,6 @@ export { vaultWrite } from './vault-write.js';
 export { vaultSearch } from './vault-search.js';
 export { vaultList } from './vault-list.js';
 export { vaultCatalog } from './vault-catalog.js';
+export { webSearch } from './web-search.js';
+export { webRead } from './web-read.js';
+export { skillLoad } from './skill-load.js';

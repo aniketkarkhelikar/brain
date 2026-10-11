@@ -38,27 +38,19 @@ describe('Phase 8 SQLite chat sessions', () => {
       } as ModelMessage,
       { role: 'assistant', content: 'I will remember that the launch is Friday.' },
     ]);
-    assert.equal(firstStore.getSession(DEFAULT_SESSION_ID)?.messageCount, 4);
+    assert.equal(firstStore.getSession(DEFAULT_SESSION_ID)?.messageCount, 2);
     firstStore.close();
 
     const restartedStore = new SessionStore(dbPath);
     const messages = restartedStore.loadMessages(DEFAULT_SESSION_ID);
     assert.deepEqual(messages, [
       { role: 'user', content: 'Remember that the launch is Friday.' },
-      {
-        role: 'assistant',
-        content: [{ type: 'tool-call', toolCallId: 'call-1', toolName: 'vaultRead', input: { filePath: 'MEMORY.md' } }],
-      },
-      {
-        role: 'tool',
-        content: [{ type: 'tool-result', toolCallId: 'call-1', toolName: 'vaultRead', output: { type: 'json', value: { content: 'Launch is Friday.' } } }],
-      },
       { role: 'assistant', content: 'I will remember that the launch is Friday.' },
     ]);
     restartedStore.appendTurn(DEFAULT_SESSION_ID, 'What day?', [
       { role: 'assistant', content: 'Friday.' },
     ]);
-    assert.equal(restartedStore.loadMessages(DEFAULT_SESSION_ID).length, 6);
+    assert.equal(restartedStore.loadMessages(DEFAULT_SESSION_ID).length, 4);
     restartedStore.close();
   });
 
@@ -76,7 +68,31 @@ describe('Phase 8 SQLite chat sessions', () => {
     store.close();
   });
 
-  it('keeps the first two and most recent messages when compacting model context', () => {
+  it('keeps a submitted prompt after interrupted generation and persists its sources with the answer', () => {
+    const store = new SessionStore(dbPath);
+    const session = store.createSession('New conversation');
+    store.appendUserMessage(session.id, 'Compare the saved options with current public guidance.');
+    assert.equal(store.getSession(session.id)?.name, 'Compare the saved options with current public guidan');
+    assert.deepEqual(store.loadMessages(session.id), [
+      { role: 'user', content: 'Compare the saved options with current public guidance.' },
+    ]);
+    store.appendAssistantMessage(session.id, [{ role: 'assistant', content: 'The saved plan is a match. [Official rules](https://example.gov/rules).' }], [
+      { kind: 'memory', title: 'Saved plan', path: 'Projects/Plan.md', verified: true },
+      { kind: 'web', title: 'Official rules', url: 'https://example.gov/rules', verified: true },
+    ]);
+    const messages = store.loadMessages(session.id) as Array<{ role: string; content: string; sources?: unknown[] }>;
+    assert.equal(messages.length, 2);
+    assert.equal(messages[1].sources?.length, 2);
+    assert.equal(compactHistory(store.loadMessages(session.id)).length, 2);
+    store.close();
+
+    const restarted = new SessionStore(dbPath);
+    assert.equal(restarted.loadMessages(session.id).length, 2);
+    assert.equal((restarted.loadMessages(session.id)[1] as { sources?: unknown[] }).sources?.length, 2);
+    restarted.close();
+  });
+
+  it('removes tool execution messages and keeps complete user/assistant turns when compacting context', () => {
     const messages: ModelMessage[] = Array.from({ length: 20 }, (_, index) => ({
       role: index % 2 === 0 ? 'user' : 'assistant',
       content: `message-${index}`,
@@ -89,6 +105,19 @@ describe('Phase 8 SQLite chat sessions', () => {
     assert.equal(compacted.at(-1)?.content, 'message-19');
     assert.equal(compactHistory(messages.slice(0, 16)).length, 16);
     assert.throws(() => compactHistory(messages, 1), /at least 2/);
+
+    const incompleteToolTurn: ModelMessage[] = [
+      { role: 'user', content: 'Read my note.' },
+      { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'dangling', toolName: 'vaultRead', input: { filePath: 'MEMORY.md' } }] } as ModelMessage,
+      { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'different', toolName: 'vaultRead', output: { type: 'json', value: {} } }] } as ModelMessage,
+      { role: 'assistant', content: 'The note says Friday.' },
+      { role: 'user', content: 'What day?' },
+    ];
+    assert.deepEqual(compactHistory(incompleteToolTurn), [
+      { role: 'user', content: 'Read my note.' },
+      { role: 'assistant', content: 'The note says Friday.' },
+      { role: 'user', content: 'What day?' },
+    ]);
   });
 
   it('rejects invalid user input and refuses to load malformed persisted history', () => {
