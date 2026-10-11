@@ -35,6 +35,12 @@ const compilePlanSchema = z.object({
   summary: z.string().trim().max(500),
   body: z.string().max(14_000),
   rationale: z.string().trim().max(1_000),
+  stateChanges: z.array(z.object({
+    key: z.string().trim().min(1).max(120),
+    currentText: z.string().trim().min(1).max(1_000),
+    supersededText: z.array(z.string().trim().min(1).max(1_000)).max(8),
+    evidence: z.string().trim().min(1).max(1_600),
+  })).max(6).optional(),
 });
 const compileBatchSchema = z.object({ items: z.array(compilePlanSchema).min(1).max(8) });
 
@@ -179,6 +185,19 @@ async function atomicWrite(root: string, relativePath: string, content: string):
   await fs.rename(temporaryPath, fullPath);
 }
 
+async function appendVaultLog(root: string, line: string): Promise<void> {
+  const filePath = path.join(root, 'log.md');
+  await fs.appendFile(filePath, `${line.trimEnd()}\n`, { encoding: 'utf8', mode: 0o600 });
+  try { await fs.chmod(filePath, 0o600); } catch { /* Best effort on filesystems without chmod support. */ }
+}
+
+async function appendActionLog(root: string, marker: string, line: string): Promise<void> {
+  const logPath = path.join(root, 'log.md');
+  let existing = '';
+  try { existing = await fs.readFile(logPath, 'utf8'); } catch (error) { if (!isMissing(error)) throw error; }
+  if (!existing.includes(marker)) await appendVaultLog(root, line);
+}
+
 function sourceHash(parsed: matter.GrayMatterFile<string>): string {
   const metadata = { ...parsed.data };
   for (const key of ['processed', 'processed_hash', 'processed_at', 'ingestion_status', 'ingestion_note', 'attempted_hash', 'compiled_to']) {
@@ -186,6 +205,46 @@ function sourceHash(parsed: matter.GrayMatterFile<string>): string {
   }
   const stableMetadata = Object.fromEntries(Object.entries(metadata).sort(([left], [right]) => left.localeCompare(right)));
   return createHash('sha256').update(JSON.stringify(stableMetadata)).update('\n').update(parsed.content).digest('hex');
+}
+
+function occurrenceCount(text: string, value: string): number {
+  return value ? text.split(value).length - 1 : 0;
+}
+
+function markSupersededClaim(content: string, oldText: string, date: string): string {
+  const index = content.indexOf(oldText);
+  if (index < 0) return content;
+  const lineStart = content.lastIndexOf('\n', index) + 1;
+  const lineBreak = content.indexOf('\n', index + oldText.length);
+  const lineEnd = lineBreak < 0 ? content.length : lineBreak;
+  const line = content.slice(lineStart, lineEnd);
+  const prefix = content.slice(0, lineStart);
+  const suffix = content.slice(lineEnd);
+  if (/^\s*[-*+]\s+/.test(line)) {
+    const separator = prefix && !prefix.endsWith('\n') ? '\n' : '';
+    const claim = line.replace(/^\s*[-*+]\s+/, '').trim();
+    return `${prefix}${separator}> Superseded ${date} — ${claim}${suffix}`;
+  }
+
+  const before = content.slice(0, index).trimEnd();
+  const after = content.slice(index + oldText.length).trimStart();
+  return `${before}${before ? '\n\n' : ''}> Superseded ${date} — ${oldText}${after ? `\n\n${after}` : ''}`;
+}
+
+function stateMarker(key: string): string {
+  const hash = createHash('sha256').update(key.trim().toLocaleLowerCase()).digest('hex').slice(0, 16);
+  return `<!-- ai-brain-state:${hash} -->`;
+}
+
+function upsertCurrentState(content: string, key: string, currentText: string, sourcePath: string, date: string): string {
+  const marker = stateMarker(key);
+  const line = `${marker}\n- **${key}** — confirmed ${date}: ${currentText} Source: [[${sourcePath.replace(/\.md$/i, '')}]]`;
+  if (content.includes(marker)) {
+    const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const section = new RegExp(`${escaped}\\r?\\n[^\\r\\n]*`);
+    return content.replace(section, line);
+  }
+  return `${content.trimEnd()}\n\n## Current State\n\n${line}\n`;
 }
 
 type CompileJournal = { sourcePath: string; hash: string; items: CompilePlan[] };
@@ -281,7 +340,9 @@ function compileSystemPrompt(): string {
     'Use only claims supported by the source. Preserve uncertainty, dates, attribution, and contradictions.',
     'First split the source into up to eight atomic, independently useful topics. Return one action per topic so a mixed brain-dump can update several notes and create another.',
     'Choose update only when one provided editable candidate is clearly the same entity, project, decision, or concept.',
-    'For update, return only a concise additive section containing genuinely new facts; the program appends it and preserves the existing note.',
+    'For update, use stateChanges for durable facts whose current value is new or has explicitly changed. Keep each key stable across updates. Copy currentText as an exact quote from the new source. Copy every conflicting current or legacy sentence from the candidate into supersededText exactly; do not paraphrase or omit earlier values. Copy evidence exactly from the source and include the new value and its explicit date/confirmation. The program validates these quotes, marks old claims as superseded, writes one clearly labeled Current State entry, and appends the change to the vault log.',
+    'For update, body is a concise event-history entry that links the source; do not present a changed value there as if it were current. Use an empty stateChanges array only when no durable current-state fact is added or changed.',
+    'If a source appears to contradict a current fact but you cannot identify the exact old claim, exact new claim, or source evidence, choose needs_review instead of appending two unqualified values.',
     'Choose already_known when the source adds no material information to an existing candidate.',
     'Choose create only when no candidate is the right home. Use the most specific allowed category.',
     'Choose needs_review whenever identity, destination, source meaning, or conflicting evidence is ambiguous. If a likely destination is not editable, park the source instead of creating a duplicate. Prefer review over a guessed action.',
@@ -310,7 +371,7 @@ async function makePlan(input: Parameters<NonNullable<IngestOptions['generatePla
       'Candidate notes from compiled areas (editable candidates include their complete current contents):',
       JSON.stringify(input.candidates),
       input.reviewGuidance ? `User review guidance for this retry: ${input.reviewGuidance}` : '',
-      `Return one action per distinct topic. For update or already_known, targetPath must be one of these exact editable paths: ${allowedTargetPaths.join(', ') || 'none'}. For create, set category and leave targetPath null. For needs_review, leave targetPath null. If a matching candidate is marked non-editable, choose needs_review.`,
+      `Return one action per distinct topic. For update or already_known, targetPath must be one of these exact editable paths: ${allowedTargetPaths.join(', ') || 'none'}. For create, set category and leave targetPath null. For needs_review, leave targetPath null. If a matching candidate is marked non-editable, choose needs_review. For each explicit state change, preserve every conflicting legacy line in supersededText exactly and quote the new source claim exactly in currentText and evidence.`,
     ].join('\n\n'),
     maxRetries: 1,
     maxOutputTokens: 6_000,
@@ -459,7 +520,7 @@ function buildNewNote(plan: CompilePlan, sourcePath: string, marker: string, cre
 function buildUpdate(plan: CompilePlan, sourcePath: string, marker: string, createdAt: Date): string {
   return [
     '',
-    `## Update — ${createdAt.toISOString().slice(0, 10)}`,
+    `## Log — ${createdAt.toISOString().slice(0, 10)}`,
     '',
     plan.body.trim(),
     '',
@@ -581,9 +642,10 @@ async function processItem(
     for (const key of ['processed', 'processed_hash', 'processed_at', 'ingestion_status', 'ingestion_note', 'attempted_hash', 'compiled_to']) {
       delete sourceMetadata[key];
     }
+    const sourceForPlan = `${JSON.stringify(sourceMetadata)}\n\n${parsed.content}`;
     const rawPlan = await generate({
       sourcePath,
-      source: `${JSON.stringify(sourceMetadata)}\n\n${parsed.content}`,
+      source: sourceForPlan,
       candidates,
       reviewGuidance: options.reviewGuidance?.[sourcePath],
     });
@@ -615,6 +677,30 @@ async function processItem(
           const reason = 'The compiler returned an empty update; the source was parked without changes.';
           await markInbox(root, sourcePath, raw, { processed: false, ingestion_status: 'needs_review', ingestion_note: reason, attempted_hash: hash });
           return { source: sourcePath, decision: 'needs_review', message: reason };
+        }
+        if (item.decision === 'update' && item.stateChanges?.length) {
+          const keys = new Set<string>();
+          for (const change of item.stateChanges) {
+            const key = change.key.trim().toLocaleLowerCase();
+            const supportedQuote = change.currentText.trim();
+            let validationIssue = '';
+            if (keys.has(key)) validationIssue = 'the state key is duplicated';
+            else if (/[\r\n]/.test(change.key) || /[\r\n]/.test(supportedQuote)) validationIssue = 'a state key or current claim contains a line break';
+            else if (!sourceForPlan.includes(supportedQuote)) validationIssue = 'the current claim is not an exact quote from the source';
+            else if (!sourceForPlan.includes(change.evidence) || !change.evidence.includes(supportedQuote)) validationIssue = 'the supporting evidence does not contain the exact current claim';
+            else {
+              const conflictingClaim = change.supersededText.find((oldText) => /[\r\n]/.test(oldText) || occurrenceCount(candidate.content, oldText) !== 1);
+              if (conflictingClaim) validationIssue = /[\r\n]/.test(conflictingClaim)
+                ? 'a superseded claim contains a line break'
+                : `a superseded claim appears ${occurrenceCount(candidate.content, conflictingClaim)} times in the target note instead of exactly once`;
+            }
+            if (validationIssue) {
+              const reason = `The compiler could not safely validate the state change for ${change.key}: ${validationIssue}. The entire source was parked without partial changes.`;
+              await markInbox(root, sourcePath, raw, { processed: false, ingestion_status: 'needs_review', ingestion_note: reason, attempted_hash: hash });
+              return { source: sourcePath, decision: 'needs_review', message: reason };
+            }
+            keys.add(key);
+          }
         }
       } else if (item.decision === 'create') {
         if (!item.category || !ALLOWED_CATEGORIES.includes(item.category) || item.targetPath !== null || !item.body.trim()) {
@@ -662,8 +748,17 @@ async function processItem(
     if (item.decision === 'update') {
       const previousContent = await readText(root, targetPath);
       if (!previousContent.includes(marker)) {
-        await atomicWrite(root, targetPath, `${previousContent.trimEnd()}\n${buildUpdate(item, archivePath, marker, now)}`);
+        let nextContent = previousContent;
+        for (const change of item.stateChanges || []) {
+          for (const oldText of change.supersededText) {
+            nextContent = markSupersededClaim(nextContent, oldText, now.toISOString().slice(0, 10));
+          }
+          nextContent = upsertCurrentState(nextContent, change.key, change.currentText, archivePath, now.toISOString().slice(0, 10));
+        }
+        await atomicWrite(root, targetPath, `${nextContent.trimEnd()}\n${buildUpdate(item, archivePath, marker, now)}`);
       }
+      const changes = (item.stateChanges || []).map((change) => `${change.key}: ${change.supersededText.length ? change.supersededText.join(' | ') : '(new current fact)'} -> ${change.currentText}`).join('; ');
+      await appendActionLog(root, marker, `- ${now.toISOString()} — Inbox updated \`${targetPath}\` from \`${archivePath}\`${changes ? `; state: ${changes}` : ''} ${marker}`);
       updatedCount += 1;
     } else {
       try {
@@ -673,6 +768,7 @@ async function processItem(
         if (!isMissing(error)) throw error;
         await atomicWrite(root, targetPath, buildNewNote(item, archivePath, marker, now));
       }
+      await appendActionLog(root, marker, `- ${now.toISOString()} — Inbox created \`${targetPath}\` from \`${archivePath}\` ${marker}`);
       createdCount += 1;
     }
   }

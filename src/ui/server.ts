@@ -12,7 +12,7 @@ import { ingestInbox, listInboxReviewQueue } from '../heartbeat/ingest.js';
 import { compactHistory, DEFAULT_SESSION_ID, normalizeConversationMessages, SessionStore, type StoredModelMessage } from '../memory/session.js';
 import { getBootstrapStatus, submitBootstrapAnswer } from '../memory/bootstrap.js';
 import { searchVault } from '../memory/search.js';
-import { chatSourcesFromToolResults, normalizeChatSources, type ChatSource } from '../types/chat.js';
+import { chatSourcesFromToolResults, normalizeChatSources, type ChatSource, type ToolTraceStep } from '../types/chat.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.resolve(here, '../../ui');
@@ -24,6 +24,12 @@ store.ensureSession(DEFAULT_SESSION_ID, 'Assistant');
 const events = new EventEmitter();
 let lastActivity: Record<string, unknown> | undefined;
 let busy = false;
+let chatBusy = false;
+let maintenanceBusy = false;
+
+function refreshBusy(): void {
+  busy = chatBusy || maintenanceBusy;
+}
 
 function publish(type: string, detail: Record<string, unknown> = {}) {
   lastActivity = { type, at: new Date().toISOString(), ...detail };
@@ -172,8 +178,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/audit') return json(res, 200, await readLatestVaultLint() || { auditedAt: null, summary: { errors: 0, warnings: 0 }, findings: [] });
     if (req.method === 'POST' && url.pathname === '/api/audit') {
-      if (busy) return json(res, 409, { error: 'A vault operation is already running.' });
-      busy = true; publish('audit-start', { message: 'Vault lint started.' });
+      if (maintenanceBusy || chatBusy) return json(res, 409, { error: 'Another assistant or vault operation is already running.' });
+      maintenanceBusy = true; refreshBusy(); publish('audit-start', { message: 'Vault lint started.' });
       try {
         const report = await runVaultLint(vaultRoot);
         publish('audit-done', { message: `Vault lint complete · ${report.summary.errors} errors · ${report.summary.warnings} warnings`, report: report.summary });
@@ -181,7 +187,7 @@ const server = http.createServer(async (req, res) => {
       } catch (error) {
         publish('error', { message: error instanceof Error ? error.message : String(error) });
         throw error;
-      } finally { busy = false; }
+      } finally { maintenanceBusy = false; refreshBusy(); }
     }
     if (req.method === 'GET' && url.pathname === '/api/onboarding') return json(res, 200, await getBootstrapStatus(vaultRoot));
     if (req.method === 'POST' && url.pathname === '/api/onboarding') {
@@ -203,8 +209,8 @@ const server = http.createServer(async (req, res) => {
       if ((await getBootstrapStatus(vaultRoot)).required) return json(res, 409, { error: 'Complete first-run setup before chatting.' });
       if (!prompt || prompt.length > 20_000) return json(res, 400, { error: 'Enter a message under 20,000 characters.' });
       if (!store.getSession(id)) return json(res, 404, { error: 'Session not found.' });
-      if (busy) return json(res, 409, { error: 'The assistant is already responding. Try again in a moment.' });
-      busy = true; publish('thinking', { message: 'Searching your brain and preparing a response.' });
+      if (chatBusy) return json(res, 409, { error: 'The assistant is already responding. Try again in a moment.' });
+      chatBusy = true; refreshBusy(); publish('thinking', { message: 'Searching your brain and preparing a response.' });
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
       const send = (type: string, payload: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
       try {
@@ -212,8 +218,13 @@ const server = http.createServer(async (req, res) => {
         store.appendUserMessage(id, prompt);
         const lintEvidence = data.lintFinding ? await collectLintReviewEvidence(data.lintFinding) : undefined;
         const agentPrompt = lintEvidence?.explicitFixtureEvidence ? `${prompt}\n\nRequired evidence to address: ${lintEvidence.explicitFixtureEvidence}` : prompt;
+        const observedSteps: ToolTraceStep[] = [];
         const result = await agentStream(agentPrompt, history, {
-          onToolActivity: (name, input) => send('tool', { name, ...(name === 'skillLoad' && input && typeof input === 'object' && typeof (input as Record<string, unknown>).skillName === 'string' ? { skillName: (input as Record<string, unknown>).skillName } : {}) }),
+          onToolActivity: (name, input) => {
+            const step = { name, ...(name === 'skillLoad' && input && typeof input === 'object' && typeof (input as Record<string, unknown>).skillName === 'string' ? { skillName: (input as Record<string, unknown>).skillName as string } : {}) };
+            observedSteps.push(step);
+            send('tool', step);
+          },
           ...(lintEvidence ? { additionalContext: lintEvidence.context, additionalSources: lintEvidence.sources, focusedReview: true } : {}),
         });
         for await (const token of result.textStream) send('delta', { text: token });
@@ -224,7 +235,8 @@ const server = http.createServer(async (req, res) => {
           ...chatSourcesFromToolResults(toolResults),
         ]);
         const toolTrace = result.toolResults ? await result.toolResults : [];
-        const steps = toolTrace.map((result: any) => ({ name: result.toolName, ...(result.toolName === 'skillLoad' && typeof result.output?.name === 'string' ? { skillName: result.output.name } : {}) }));
+        const fallbackSteps = toolTrace.map((result: any) => ({ name: result.toolName, ...(result.toolName === 'skillLoad' && typeof result.output?.name === 'string' ? { skillName: result.output.name } : {}) }));
+        const steps = observedSteps.length ? observedSteps : fallbackSteps;
         store.appendAssistantMessage(id, responseMessages, sources, steps);
         send('sources', { sources });
         send('done', { messages: flattenMessages(store.loadMessages(id)) });
@@ -232,7 +244,7 @@ const server = http.createServer(async (req, res) => {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         send('error', { error: message }); publish('error', { message });
-      } finally { busy = false; res.end(); }
+      } finally { chatBusy = false; refreshBusy(); res.end(); }
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/brain/files') return json(res, 200, await listFiles(url.searchParams.get('folder') || ''));
@@ -258,24 +270,24 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/review/retry') {
       const data = await body(req); const source = String(data.source || ''); const guidance = String(data.guidance || '').trim();
       if (!source.startsWith('Inbox/') || !guidance || guidance.length > 2_000) return json(res, 400, { error: 'Provide a queued Inbox path and concise guidance.' });
-      if (busy) return json(res, 409, { error: 'A vault operation is already running.' });
-      busy = true; publish('ingest-start', { message: `Resolving ${source}.` });
+      if (maintenanceBusy || chatBusy) return json(res, 409, { error: 'Another assistant or vault operation is already running.' });
+      maintenanceBusy = true; refreshBusy(); publish('ingest-start', { message: `Resolving ${source}.` });
       try { const result = await ingestInbox({ vaultPath: vaultRoot, retryNeedsReview: true, sourcePaths: [source], reviewGuidance: { [source]: guidance } }); publish('ingest-done', { message: `Review complete · ${result.created} created · ${result.updated} updated · ${result.needsReview} still need review`, stats: result }); return json(res, 200, result); }
-      finally { busy = false; }
+      finally { maintenanceBusy = false; refreshBusy(); }
     }
     if (req.method === 'POST' && url.pathname === '/api/ingest') {
-      if (busy) return json(res, 409, { error: 'A vault operation is already running.' });
-      busy = true; publish('ingest-start', { message: 'Inbox ingestion started.' });
+      if (maintenanceBusy || chatBusy) return json(res, 409, { error: 'Another assistant or vault operation is already running.' });
+      maintenanceBusy = true; refreshBusy(); publish('ingest-start', { message: 'Inbox ingestion started.' });
       try { const stats = await ingestInbox({ vaultPath: vaultRoot }); publish('ingest-done', { message: `Ingestion complete · ${stats.created} created · ${stats.updated} updated · ${stats.needsReview} to review`, stats }); return json(res, 200, stats); }
       catch (error) { publish('error', { message: error instanceof Error ? error.message : String(error) }); throw error; }
-      finally { busy = false; }
+      finally { maintenanceBusy = false; refreshBusy(); }
     }
     if (req.method === 'POST' && url.pathname === '/api/heartbeat') {
-      if (busy) return json(res, 409, { error: 'A vault operation is already running.' });
-      busy = true; publish('heartbeat-start', { message: 'Scheduled brain check started.' });
+      if (maintenanceBusy || chatBusy) return json(res, 409, { error: 'Another assistant or vault operation is already running.' });
+      maintenanceBusy = true; refreshBusy(); publish('heartbeat-start', { message: 'Scheduled brain check started.' });
       try { const result = await runHeartbeat({ vaultPath: vaultRoot, timezone: process.env.HEARTBEAT_TIMEZONE || 'Asia/Kolkata' }); publish('heartbeat-done', { message: 'Brain check complete.', stats: result.ingestion }); return json(res, 200, result); }
       catch (error) { publish('error', { message: error instanceof Error ? error.message : String(error) }); throw error; }
-      finally { busy = false; }
+      finally { maintenanceBusy = false; refreshBusy(); }
     }
     if (req.method === 'GET' && url.pathname.startsWith('/api/')) return json(res, 404, { error: 'No such API route.' });
     const requested = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname.slice(1));
@@ -294,29 +306,29 @@ const server = http.createServer(async (req, res) => {
 server.listen(port, host, () => {
   console.log(`Second Brain UI ready at http://${host}:${port} · vault ${vaultRoot}`);
   startHeartbeatSchedule({ vaultPath: vaultRoot, onStatus: (status, detail) => {
-    if (status === 'started') { busy = true; publish('heartbeat-start', { message: 'Scheduled brain check started.' }); }
-    else if (status === 'completed') { busy = false; publish('heartbeat-done', { message: 'Scheduled brain check complete.', stats: (detail as any)?.items ? detail : undefined }); }
-    else if (status === 'failed') { busy = false; publish('error', { message: detail instanceof Error ? detail.message : String(detail) }); }
+    if (status === 'started') { maintenanceBusy = true; refreshBusy(); publish('heartbeat-start', { message: 'Scheduled brain check started.' }); }
+    else if (status === 'completed') { maintenanceBusy = false; refreshBusy(); publish('heartbeat-done', { message: 'Scheduled brain check complete.', stats: (detail as any)?.items ? detail : undefined }); }
+    else if (status === 'failed') { maintenanceBusy = false; refreshBusy(); publish('error', { message: detail instanceof Error ? detail.message : String(detail) }); }
     else if (status === 'scheduled') publish('schedule-ready', { message: 'Automatic brain checks are scheduled.' });
-  }, shouldRun: () => !busy });
-  startVaultLintSchedule({ vaultPath: vaultRoot, shouldRun: () => !busy, onStatus: (status, detail) => {
-    if (status === 'started') { busy = true; publish('audit-start', { message: 'Scheduled vault lint started.' }); }
-    else if (status === 'completed') { busy = false; const report = detail as { summary?: { errors: number; warnings: number } }; publish('audit-done', { message: `Vault lint complete · ${report.summary?.errors ?? 0} errors · ${report.summary?.warnings ?? 0} warnings`, report: report.summary }); }
-    else if (status === 'failed') { busy = false; publish('error', { message: detail instanceof Error ? detail.message : String(detail) }); }
+  }, shouldRun: () => !maintenanceBusy && !chatBusy });
+  startVaultLintSchedule({ vaultPath: vaultRoot, onStatus: (status, detail) => {
+    if (status === 'started') { maintenanceBusy = true; refreshBusy(); publish('audit-start', { message: 'Scheduled vault lint started.' }); }
+    else if (status === 'completed') { maintenanceBusy = false; refreshBusy(); const report = detail as { summary?: { errors: number; warnings: number } }; publish('audit-done', { message: `Vault lint complete · ${report.summary?.errors ?? 0} errors · ${report.summary?.warnings ?? 0} warnings`, report: report.summary }); }
+    else if (status === 'failed') { maintenanceBusy = false; refreshBusy(); publish('error', { message: detail instanceof Error ? detail.message : String(detail) }); }
     else if (status === 'scheduled') publish('audit-schedule-ready', { message: 'Automatic vault lint is scheduled.' });
-  } });
+  }, shouldRun: () => !maintenanceBusy && !chatBusy });
   void (async () => {
     let previousAudit: Awaited<ReturnType<typeof readLatestVaultLint>>;
     try { previousAudit = await readLatestVaultLint(); } catch { previousAudit = undefined; }
     const lastRun = previousAudit?.auditedAt ? Date.parse(previousAudit.auditedAt) : 0;
-    if (busy || (Number.isFinite(lastRun) && Date.now() - lastRun < 24 * 60 * 60 * 1_000)) return;
-    busy = true; publish('audit-start', { message: 'Running the overdue vault lint.' });
+    if (maintenanceBusy || chatBusy || (Number.isFinite(lastRun) && Date.now() - lastRun < 24 * 60 * 60 * 1_000)) return;
+    maintenanceBusy = true; refreshBusy(); publish('audit-start', { message: 'Running the overdue vault lint.' });
     try {
       const report = await runVaultLint(vaultRoot);
       publish('audit-done', { message: `Vault lint complete · ${report.summary.errors} errors · ${report.summary.warnings} warnings`, report: report.summary });
     } catch (error) {
       publish('error', { message: error instanceof Error ? error.message : String(error) });
-    } finally { busy = false; }
+    } finally { maintenanceBusy = false; refreshBusy(); }
   })();
 });
 server.on('close', () => { store.close(); });

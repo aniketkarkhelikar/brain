@@ -155,6 +155,9 @@ export async function runVaultLint(
   const temporaryPath = `${absoluteReportPath}.tmp-${process.pid}-${Date.now()}`;
   await fs.writeFile(temporaryPath, `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   await fs.rename(temporaryPath, absoluteReportPath);
+  const actionLog = path.join(root, 'log.md');
+  await fs.appendFile(actionLog, `- ${report.auditedAt}: vault lint scanned ${report.filesScanned} notes; ${report.summary.errors} errors; ${report.summary.warnings} warnings.\n`, { encoding: 'utf8', mode: 0o600 });
+  try { await fs.chmod(actionLog, 0o600); } catch { /* Best effort on filesystems without chmod support. */ }
   return report;
 }
 
