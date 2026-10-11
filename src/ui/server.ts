@@ -11,6 +11,7 @@ import { ingestInbox, listInboxReviewQueue } from '../heartbeat/ingest.js';
 import { compactHistory, DEFAULT_SESSION_ID, SessionStore } from '../memory/session.js';
 import { getBootstrapStatus, submitBootstrapAnswer } from '../memory/bootstrap.js';
 import { searchVault } from '../memory/search.js';
+import { discoverSkills, loadSkill } from '../skills/loader.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.resolve(here, '../../ui');
@@ -159,6 +160,13 @@ const server = http.createServer(async (req, res) => {
     const note = url.pathname === '/api/brain/note' && url.searchParams.get('path');
     if (req.method === 'GET' && note) return json(res, 200, { path: note, content: await fs.readFile(await verifiedVaultPath(note), 'utf8') });
     if (req.method === 'GET' && url.pathname === '/api/review') return json(res, 200, await listInboxReviewQueue(vaultRoot));
+    if (req.method === 'GET' && url.pathname === '/api/skills') return json(res, 200, await discoverSkills());
+    if (req.method === 'GET' && url.pathname === '/api/skill-content') {
+      const name = url.searchParams.get('name') || '';
+      const resource = url.searchParams.get('resource') || undefined;
+      const result = await loadSkill(name, resource);
+      return json(res, result.success ? 200 : 404, result);
+    }
     if (req.method === 'POST' && url.pathname === '/api/review/retry') {
       const data = await body(req); const source = String(data.source || ''); const guidance = String(data.guidance || '').trim();
       if (!source.startsWith('Inbox/') || !guidance || guidance.length > 2_000) return json(res, 400, { error: 'Provide a queued Inbox path and concise guidance.' });

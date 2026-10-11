@@ -24,9 +24,10 @@ function relativeDate(date) {
 function switchView(view) {
   state.view = view; $$('.view').forEach((item) => item.classList.toggle('active', item.id === `view-${view}`));
   $$('.nav-item[data-view]').forEach((item) => item.classList.toggle('active', item.dataset.view === view));
-  $('#crumb-current').textContent = ({ assistant: 'Assistant', brain: 'Brain', projects: 'Projects', inbox: 'Inbox', tasks: 'Tasks', agents: 'Background agents', settings: 'Settings', email: 'Email', meetings: 'Meetings', calendar: 'Calendar', apps: 'Apps' })[view] || view;
+  $('#crumb-current').textContent = ({ assistant: 'Assistant', brain: 'Brain', projects: 'Projects', inbox: 'Inbox', tasks: 'Tasks', skills: 'Agent Skills', agents: 'Background agents', settings: 'Settings', email: 'Email', meetings: 'Meetings', calendar: 'Calendar', apps: 'Apps' })[view] || view;
   if (view === 'brain') loadBrain(); if (view === 'inbox') loadReview();
   if (view === 'projects') loadProjects(); if (view === 'agents') loadAgents(); if (view === 'tasks') loadTasks();
+  if (view === 'skills') loadSkills();
 }
 function addMessage(role, text, { streaming = false } = {}) {
   $('#welcome').hidden = true;
@@ -150,6 +151,51 @@ function renderAgentStatus() {
   $('#agent-activity').innerHTML = state.events.length ? state.events.slice(0,8).map((item) => `<div class="agent-event"><span class="activity-marker"></span><div><strong>${esc(item.title)}</strong><small>${esc(item.text)}</small></div><time>${new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(item.time)}</time></div>`).join('') : '<div class="empty-state">No runs yet. Your schedule is active.</div>';
 }
 async function loadAgents() { await loadOverview(); renderAgentStatus(); }
+async function loadSkills() {
+  try {
+    const skills = await api('/api/skills');
+    if ($('#skills-count')) $('#skills-count').textContent = skills.length;
+    $('#skills-panel').innerHTML = skills.length
+      ? skills.map((s) => `
+        <article class="file-card" data-skill="${esc(s.name)}" style="display:flex;flex-direction:column;justify-content:space-between;min-height:160px;cursor:default;">
+          <div>
+            <div class="file-card-top">
+              <span class="file-icon">⚡</span>
+              <div>
+                <strong>${esc(s.name)}</strong>
+                <small>Anthropic Standard · Level 1 Metadata</small>
+              </div>
+            </div>
+            <p style="font-size:12px;line-height:1.45;color:#64748b;margin-top:10px;">${esc(s.description)}</p>
+          </div>
+          <div style="margin-top:14px;display:flex;gap:8px;">
+            <button class="secondary-button compact view-skill-btn" data-skill-name="${esc(s.name)}">View Instructions →</button>
+          </div>
+        </article>
+      `).join('')
+      : '<div class="empty-state">No agent skills installed.</div>';
+    $$('.view-skill-btn').forEach((b) => b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openSkill(b.dataset.skillName);
+    }));
+  } catch (error) {
+    $('#skills-panel').innerHTML = `<div class="empty-state">${esc(error.message)}</div>`;
+  }
+}
+async function openSkill(skillName) {
+  try {
+    const res = await api(`/api/skill-content?name=${encodeURIComponent(skillName)}`);
+    if (res.success) {
+      $('#modal-title').textContent = `${skillName} (Level 2 Instructions)`;
+      $('#modal-content').textContent = res.content || res.instructions || 'No instructions found.';
+      $('#modal').hidden = false;
+    } else {
+      toast('Could not open skill', res.error || 'Skill not found', 'error');
+    }
+  } catch (err) {
+    toast('Could not open skill', err.message, 'error');
+  }
+}
 function renderFiles(files) { $('#brain-panel').innerHTML = files.length ? `<div class="file-grid">${files.map((file) => `<article class="file-card" data-note="${esc(file.path)}"><div class="file-card-top"><span class="file-icon">▤</span><div><strong>${esc(file.name)}</strong><small>${esc(file.folder)} · ${relativeDate(file.modified)}</small></div></div><p>${(file.bytes / 1024).toFixed(1)} KB · Open note</p></article>`).join('')}</div>` : '<div class="empty-state">No Markdown notes in this vault yet.</div>'; bindNotes(); }
 function renderTable(files) { $('#brain-panel').innerHTML = files.length ? `<table class="brain-table"><thead><tr><th>Name</th><th>Folder</th><th>Size</th><th>Last modified</th></tr></thead><tbody>${files.map((file) => `<tr><td data-note="${esc(file.path)}">${esc(file.name)}</td><td>${esc(file.folder)}</td><td>${(file.bytes / 1024).toFixed(1)} KB</td><td>${new Date(file.modified).toLocaleDateString()}</td></tr>`).join('')}</tbody></table>` : '<div class="empty-state">Your notes will appear here.</div>'; bindNotes(); }
 async function renderGraph(files) {

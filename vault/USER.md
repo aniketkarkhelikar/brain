@@ -2,43 +2,42 @@
 
 ## Basic Info
 
-- **Name:** (Your name)
-- **Email:** (Your email)
+- **Name:** aniket
+- **Email:** (not provided)
 - **Timezone:** Asia/Kolkata (IST, UTC+5:30)
 - **Location:** India
 
 ## Professional Context
 
 ### Current Role
-- (What you do — will be filled during bootstrap)
-
+- STUDENT
 ### Key Projects
-- AI Second Brain (this project)
-
+- AI SECOND BRAIN
 ### Active Goals
 - Build a proactive AI assistant that manages knowledge automatically
 
 ## Working Style
 
 ### Communication Preferences
-- Direct and concise
-- Technical depth when relevant
-- No hand-holding for obvious things
-
+- Reply style: DETAILED
+- Suggestions: OFFER WHEN ASKED
 ### Schedule Patterns
-- Active hours: 8:00 AM — 10:00 PM IST
-- Best focus time: (to be learned)
-
+- Active hours: UNKNOWN RANDOMLY AVAILABLE
+- Regular commitments: YES 930 PM WITH PRAKASH UNCLE REGARDING BRAIN 8 PM EVERY THURDAY WITH SARIGA FOR WEEKLY REVIEW IN MY INTERNSHIP AT SARTECH LABS
+- Best focus time: (not provided)
 ### Team
-- (People you work with — filled during bootstrap)
-
+- SARIGA - SARTECH LABS CEO SUMIT MY FRIEND PRAKASH KONDEKAR - EX APPLE EMPLOYEE WE ARE BUILDING SECOND BRAIN TOGETHER NIKHIL COLLEGE FRIEND INVOLVED IN MOST OF MY PROJECTS TILL SECOND YEAR NICE TO TALK TO WE CAN RANDOMLY CHAT ABOUT ANYTHING IN TECH
 ## Integrations & Accounts
 
 ### Email
-- Primary: (your email — configure in .env)
-
+- Primary: Not configured yet
 ### Calendar
-- Google Calendar: (configure .ics URL in .env)
-
+- Google Calendar: Not configured yet
+- Private calendar URL: configure locally in .env if needed
 ## Important Contacts
 - (Filled as the agent learns who matters to you)
+
+## Proactivity
+
+- Selected level: **Partner**
+

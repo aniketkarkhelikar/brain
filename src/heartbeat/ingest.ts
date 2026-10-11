@@ -10,6 +10,7 @@ import { generateObject } from 'ai';
 import { z } from 'zod';
 import { getLanguageModel } from '../providers.js';
 import { indexVault, searchVault, type HybridSearchResult, type MemorySearchOptions } from '../memory/search.js';
+import { sanitizeUntrustedContent } from '../security/sanitizer.js';
 
 const SOURCE_MARKER = '<!-- ai-brain-source-sha256:';
 const MAX_SOURCE_CHARS = 16_000;
@@ -541,9 +542,10 @@ async function processItem(
     for (const key of ['processed', 'processed_hash', 'processed_at', 'ingestion_status', 'ingestion_note', 'attempted_hash', 'compiled_to']) {
       delete sourceMetadata[key];
     }
+    const sanitizedContent = sanitizeUntrustedContent(parsed.content).text;
     const rawPlan = await generate({
       sourcePath,
-      source: `${JSON.stringify(sourceMetadata)}\n\n${parsed.content}`,
+      source: `${JSON.stringify(sourceMetadata)}\n\n${sanitizedContent}`,
       candidates,
       reviewGuidance: options.reviewGuidance?.[sourcePath],
     });

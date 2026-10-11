@@ -40,7 +40,20 @@ export async function runCli(runtime: CliRuntime): Promise<void> {
       return;
     }
     if (prompt === '/help') {
-      write('Commands: /new [name], /use <id>, /sessions, /review, /audit, /reset, /exit\n\n');
+      write('Commands: /new [name], /use <id>, /sessions, /skills, /review, /audit, /reset, /exit\n\n');
+      continue;
+    }
+    if (prompt === '/skills') {
+      try {
+        const { discoverSkills } = await import('./skills/loader.js');
+        const skills = await discoverSkills();
+        write(`Installed Agent Skills (${skills.length}) [Anthropic Standard]:\n\n`);
+        for (const s of skills) {
+          write(`- ${s.name}\n  ${s.description}\n  Path: ${s.skillPath}\n\n`);
+        }
+      } catch (error) {
+        write(`Failed to list skills: ${error instanceof Error ? error.message : String(error)}\n\n`);
+      }
       continue;
     }
     if (prompt === '/review') {

@@ -8,6 +8,7 @@
 import { tool, type Tool } from 'ai';
 import { z } from 'zod';
 import { convert } from 'html-to-text';
+import { sanitizeUntrustedContent } from '../security/sanitizer.js';
 
 const webReadSchema = z.object({
   url: z.string().url().describe('The full web URL to fetch and read, e.g. "https://example.com/article"'),
@@ -56,8 +57,10 @@ export async function fetchAndConvertUrl(url: string, maxCharacters = 12_000): P
   });
 
   const normalized = cleanText.replace(/\n{3,}/g, '\n\n').trim();
-  const truncated = normalized.length > maxCharacters;
-  const content = truncated ? `${normalized.slice(0, maxCharacters)}\n\n[Content truncated at ${maxCharacters} characters]` : normalized;
+  const sanitized = sanitizeUntrustedContent(normalized);
+  const safeText = sanitized.text;
+  const truncated = safeText.length > maxCharacters;
+  const content = truncated ? `${safeText.slice(0, maxCharacters)}\n\n[Content truncated at ${maxCharacters} characters]` : safeText;
 
   return { title, content, truncated };
 }
